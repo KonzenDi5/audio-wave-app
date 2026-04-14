@@ -167,10 +167,11 @@ export class WaveExportComponent implements AfterViewInit {
   ): void {
     const centerX = w / 2;
     const centerY = h / 2;
-    const ringBaseRadius = w * 0.375;
-    const ringAmplitude = w * 0.035;
+    const ringBaseRadius = w * 0.368;
+    const ringAmplitude = w * 0.05;
     const guideColor = style === 'minimal' ? '#22c55e' : '#4ade80';
     const samples = sampleWaveform(data, PREVIEW_SAMPLE_COUNT);
+    const angleStep = (Math.PI * 2) / samples.length;
 
     ctx.save();
     ctx.strokeStyle = style === 'minimal' ? 'rgba(34, 197, 94, 0.28)' : 'rgba(74, 222, 128, 0.22)';
@@ -182,25 +183,25 @@ export class WaveExportComponent implements AfterViewInit {
     ctx.shadowColor = guideColor;
     ctx.shadowBlur = style === 'minimal' ? 0 : 18;
     ctx.strokeStyle = guideColor;
-    ctx.lineWidth = Math.max(2, w * 0.0034);
-    ctx.beginPath();
+    ctx.lineWidth = Math.max(2, w * 0.0032);
 
-    for (let index = 0; index <= samples.length; index++) {
-      const angle = (index / samples.length) * Math.PI * 2 - Math.PI / 2;
-      const sample = samples[index % samples.length];
-      const radius = ringBaseRadius + sample * ringAmplitude;
-      const x = centerX + Math.cos(angle) * radius;
-      const y = centerY + Math.sin(angle) * radius;
+    for (let index = 0; index < samples.length; index++) {
+      const angle = index * angleStep - Math.PI / 2;
+      const sample = samples[index];
+      const startRadius = ringBaseRadius;
+      const endRadius = ringBaseRadius + sample * ringAmplitude;
 
-      if (index === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
+      ctx.beginPath();
+      ctx.moveTo(
+        centerX + Math.cos(angle) * startRadius,
+        centerY + Math.sin(angle) * startRadius
+      );
+      ctx.lineTo(
+        centerX + Math.cos(angle) * endRadius,
+        centerY + Math.sin(angle) * endRadius
+      );
+      ctx.stroke();
     }
-
-    ctx.closePath();
-    ctx.stroke();
 
     // Marcador discreto de orientação para estabilizar a leitura
     ctx.fillStyle = guideColor;

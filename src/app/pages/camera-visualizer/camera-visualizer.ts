@@ -10,10 +10,10 @@ import {
 import { RouterLink } from '@angular/router';
 
 import { AudioService } from '../../services/audio';
+import { PythonWaveDecoderService } from '../../services/python-wave-decoder';
 import {
   PREVIEW_SAMPLE_COUNT,
   createOverlayAmplitudes,
-  sampleWaveform,
 } from '../../shared/wave-payload';
 
 @Component({
@@ -28,12 +28,14 @@ export class CameraVisualizerPage implements OnDestroy {
 
   private readonly ngZone = inject(NgZone);
   private readonly audioService = inject(AudioService);
+  private readonly pythonWaveDecoder = inject(PythonWaveDecoderService);
   private mediaStream: MediaStream | null = null;
   private animationId = 0;
   private scanCanvas: HTMLCanvasElement | null = null;
   private scanCtx: CanvasRenderingContext2D | null = null;
   private usingSessionAudio = false;
   private lastDetectedPreview: Float32Array<ArrayBufferLike> = new Float32Array(0);
+  private isDecodingFrame = false;
 
   // Dados exibidos no overlay a partir do payload lido da imagem
   private waveAmplitudes: number[] = [];
@@ -270,7 +272,7 @@ export class CameraVisualizerPage implements OnDestroy {
 
       frameCount += 1;
       if (frameCount % 4 === 0) {
-        this.scanFrame(video, videoWidth, videoHeight);
+        void this.scanFrame(video, videoWidth, videoHeight);
       }
 
       const rect = video.getBoundingClientRect();
@@ -291,7 +293,16 @@ export class CameraVisualizerPage implements OnDestroy {
     draw();
   }
 
-  private scanFrame(video: HTMLVideoElement, videoWidth: number, videoHeight: number): void {
+  private async scanFrame(
+    video: HTMLVideoElement,
+    videoWidth: number,
+    videoHeight: number
+  ): Promise<void> {
+    if (this.isDecodingFrame) {
+      return;
+    }
+
+    this.isDecodingFrame = true;
     const scale = 0.5;
     const scanWidth = Math.floor(videoWidth * scale);
     const scanHeight = Math.floor(videoHeight * scale);
@@ -300,15 +311,24 @@ export class CameraVisualizerPage implements OnDestroy {
     this.scanCanvas!.height = scanHeight;
     this.scanCtx!.drawImage(video, 0, 0, scanWidth, scanHeight);
 
-    const imageData = this.scanCtx!.getImageData(0, 0, scanWidth, scanHeight);
-    const preview = this.extractPreviewWave(imageData.data, scanWidth, scanHeight);
+    try {
+      const imageData = this.scanCtx!.getImageData(0, 0, scanWidth, scanHeight);
+      const pythonPreview = await this.pythonWaveDecoder.decodeFrame(
+        imageData.data,
+        scanWidth,
+        scanHeight
+      );
+      const preview = pythonPreview ?? this.extractPreviewWave(imageData.data, scanWidth, scanHeight);
 
-    if (preview) {
-      this.applyPreview(preview);
-      return;
+      if (preview) {
+        this.applyPreview(preview);
+        return;
+      }
+
+      this.clearDetection();
+    } finally {
+      this.isDecodingFrame = false;
     }
-
-    this.clearDetection();
   }
 
   private applyPreview(preview: Float32Array): void {
