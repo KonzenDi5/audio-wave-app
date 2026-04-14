@@ -28,8 +28,17 @@ export class CameraVisualizerPage implements OnDestroy {
   // Dados extraídos da imagem capturada pela câmera
   private waveAmplitudes: number[] = [];
 
+  // Síntese de áudio a partir da onda detectada
+  private audioCtx: AudioContext | null = null;
+  private scriptNode: ScriptProcessorNode | null = null;
+  private gainNode: GainNode | null = null;
+  private normalizedWave: Float32Array = new Float32Array(0);
+  private playbackPhase = 0;
+
   readonly isActive = signal(false);
   readonly isDetected = signal(false);
+  readonly isPlayingAudio = signal(false);
+  readonly isMuted = signal(false);
   readonly hasError = signal('');
   readonly facingMode = signal<'environment' | 'user'>('environment');
 
@@ -69,6 +78,9 @@ export class CameraVisualizerPage implements OnDestroy {
       this.scanCanvas = document.createElement('canvas');
       this.scanCtx = this.scanCanvas.getContext('2d', { willReadFrequently: true })!;
 
+      // Inicializar contexto de áudio para síntese em tempo real
+      await this.initAudio();
+
       this.isActive.set(true);
       this.ngZone.runOutsideAngular(() => this.animate());
     } catch (err) {
@@ -90,6 +102,7 @@ export class CameraVisualizerPage implements OnDestroy {
     this.mediaStream = null;
     this.scanCanvas = null;
     this.scanCtx = null;
+    this.destroyAudio();
     this.isActive.set(false);
     this.isDetected.set(false);
   }
@@ -130,6 +143,72 @@ export class CameraVisualizerPage implements OnDestroy {
         a.click();
         URL.revokeObjectURL(url);
       }
+    }
+  }
+
+  // Inicializar contexto de áudio para síntese em tempo real
+  private async initAudio(): Promise<void> {
+    try {
+      this.audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      await this.audioCtx.resume();
+
+      this.gainNode = this.audioCtx.createGain();
+      this.gainNode.gain.value = 0.6;
+      this.gainNode.connect(this.audioCtx.destination);
+
+      // ScriptProcessor gera áudio a partir da onda normalizada
+      this.scriptNode = this.audioCtx.createScriptProcessor(2048, 0, 1);
+      this.playbackPhase = 0;
+
+      this.scriptNode.onaudioprocess = (event: AudioProcessingEvent) => {
+        const output = event.outputBuffer.getChannelData(0);
+        const wave = this.normalizedWave;
+
+        if (wave.length === 0) {
+          output.fill(0);
+          return;
+        }
+
+        for (let i = 0; i < output.length; i++) {
+          const floor = Math.floor(this.playbackPhase);
+          const frac = this.playbackPhase - floor;
+          const idx = floor % wave.length;
+          const nextIdx = (floor + 1) % wave.length;
+
+          // Interpolação linear entre amostras
+          output[i] = wave[idx] * (1 - frac) + wave[nextIdx] * frac;
+
+          this.playbackPhase += 1;
+          if (this.playbackPhase >= wave.length) {
+            this.playbackPhase -= wave.length;
+          }
+        }
+      };
+
+      this.scriptNode.connect(this.gainNode);
+    } catch (err) {
+      console.warn('Não foi possível inicializar áudio:', err);
+    }
+  }
+
+  // Parar e limpar recursos de áudio
+  private destroyAudio(): void {
+    this.scriptNode?.disconnect();
+    this.scriptNode = null;
+    this.gainNode?.disconnect();
+    this.gainNode = null;
+    this.audioCtx?.close();
+    this.audioCtx = null;
+    this.normalizedWave = new Float32Array(0);
+    this.playbackPhase = 0;
+    this.isPlayingAudio.set(false);
+  }
+
+  // Alternar mudo/desmudo
+  toggleMute(): void {
+    this.isMuted.set(!this.isMuted());
+    if (this.gainNode) {
+      this.gainNode.gain.value = this.isMuted() ? 0 : 0.6;
     }
   }
 
@@ -216,6 +295,10 @@ export class CameraVisualizerPage implements OnDestroy {
     if (greenCount < 50) {
       this.isDetected.set(false);
       this.waveAmplitudes = [];
+      this.normalizedWave = new Float32Array(0);
+      if (this.isPlayingAudio()) {
+        this.ngZone.run(() => this.isPlayingAudio.set(false));
+      }
       return;
     }
 
@@ -267,6 +350,21 @@ export class CameraVisualizerPage implements OnDestroy {
     }
 
     this.waveAmplitudes = smoothed;
+
+    // Converter amplitudes para forma de onda normalizada [-1, 1]
+    const maxAmpNorm = Math.max(...smoothed);
+    const minAmpNorm = Math.min(...smoothed);
+    const range = maxAmpNorm - minAmpNorm || 1;
+    const mid = (maxAmpNorm + minAmpNorm) / 2;
+
+    this.normalizedWave = new Float32Array(smoothed.length);
+    for (let i = 0; i < smoothed.length; i++) {
+      this.normalizedWave[i] = (smoothed[i] - mid) / (range / 2);
+    }
+
+    if (!this.isPlayingAudio()) {
+      this.ngZone.run(() => this.isPlayingAudio.set(true));
+    }
   }
 
   // Desenhar a onda detectada como overlay
@@ -316,7 +414,8 @@ export class CameraVisualizerPage implements OnDestroy {
     ctx.fillStyle = 'rgba(34, 197, 94, 0.9)';
     ctx.font = `bold ${w * 0.03}px Inter, sans-serif`;
     ctx.textAlign = 'center';
-    ctx.fillText('ONDA DETECTADA', cx, h * 0.06);
+    const rotulo = this.isPlayingAudio() ? '♪ REPRODUZINDO...' : 'ONDA DETECTADA';
+    ctx.fillText(rotulo, cx, h * 0.06);
 
     // Ponto central
     ctx.beginPath();

@@ -182,6 +182,12 @@
     border: 1px solid rgba(34, 197, 94, 0.3);
   }
 
+  &.playing {
+    color: #22c55e;
+    background: rgba(34, 197, 94, 0.2);
+    border: 1px solid rgba(34, 197, 94, 0.5);
+  }
+
   .status-dot {
     width: 8px;
     height: 8px;
@@ -257,6 +263,13 @@
   &:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+}
+
+.mute-btn {
+  &.muted {
+    background: #475569;
+    color: #94a3b8;
   }
 }
 
