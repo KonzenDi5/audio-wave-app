@@ -240,11 +240,6 @@ export class WaveExportComponent implements AfterViewInit {
     const actualBarWidth = Math.max(1, barWidth - gap);
     const minBarH = Math.max(2, w * 0.003);
 
-    if (style !== 'minimal') {
-      ctx.shadowColor = colors[0];
-      ctx.shadowBlur = 8;
-    }
-
     for (let i = 0; i < barCount; i++) {
       const x = padX + i * barWidth + gap * 0.5;
       const sample = samples[i];
@@ -265,8 +260,6 @@ export class WaveExportComponent implements AfterViewInit {
       ctx.fillStyle = `rgba(0, ${g}, 0, 0.55)`;
       ctx.fillRect(x, centerY - barH, actualBarWidth, barH * 2);
     }
-
-    ctx.shadowBlur = 0;
     ctx.restore();
   }
 

@@ -39,10 +39,11 @@ export class CameraVisualizerPage implements OnDestroy {
 
   private waveAmplitudes: number[] = [];
 
-  // Síntese via PeriodicWave (Python FFT)
+  // Síntese via AudioBuffer (Python PCM)
   private audioCtx: AudioContext | null = null;
-  private oscillatorNode: OscillatorNode | null = null;
+  private bufferSourceNode: AudioBufferSourceNode | null = null;
   private synthGainNode: GainNode | null = null;
+  private lastBufferPreview: Float32Array<ArrayBufferLike> = new Float32Array(0);
 
   readonly isActive = signal(false);
   readonly isDetected = signal(false);
@@ -197,14 +198,15 @@ export class CameraVisualizerPage implements OnDestroy {
   }
 
   private destroyAudio(): void {
-    if (this.oscillatorNode) {
-      try { this.oscillatorNode.stop(); } catch { /* já parado */ }
-      this.oscillatorNode.disconnect();
-      this.oscillatorNode = null;
+    if (this.bufferSourceNode) {
+      try { this.bufferSourceNode.stop(); } catch { /* already stopped */ }
+      this.bufferSourceNode.disconnect();
+      this.bufferSourceNode = null;
     }
 
     this.synthGainNode?.disconnect();
     this.synthGainNode = null;
+    this.lastBufferPreview = new Float32Array(0);
 
     if (this.audioCtx) {
       void this.audioCtx.close();
@@ -353,28 +355,39 @@ export class CameraVisualizerPage implements OnDestroy {
       return;
     }
 
-    const real = new Float32Array(result.fftReal);
-    const imag = new Float32Array(result.fftImag);
-    const wave = this.audioCtx.createPeriodicWave(real, imag, {
-      disableNormalization: false,
-    });
-
-    if (this.oscillatorNode) {
-      this.oscillatorNode.setPeriodicWave(wave);
-      this.oscillatorNode.frequency.setTargetAtTime(
-        result.baseFreq,
-        this.audioCtx.currentTime,
-        0.05
-      );
-    } else {
-      this.oscillatorNode = this.audioCtx.createOscillator();
-      this.oscillatorNode.setPeriodicWave(wave);
-      this.oscillatorNode.frequency.value = result.baseFreq;
-      this.oscillatorNode.connect(this.synthGainNode);
-      this.oscillatorNode.start();
+    // Skip regeneration if waveform hasn't changed significantly
+    if (this.bufferSourceNode && this.lastBufferPreview.length === result.preview.length) {
+      const sim = this.cosineSimilarity(this.lastBufferPreview, result.preview);
+      if (sim > 0.92) {
+        return;
+      }
     }
 
-    const targetGain = this.isMuted() ? 0 : 0.4;
+    // Stop current playback cleanly
+    if (this.bufferSourceNode) {
+      try { this.bufferSourceNode.stop(); } catch { /* ok */ }
+      this.bufferSourceNode.disconnect();
+      this.bufferSourceNode = null;
+    }
+
+    // Create AudioBuffer from PCM samples
+    const buffer = this.audioCtx.createBuffer(
+      1,
+      result.pcmSamples.length,
+      result.sampleRate
+    );
+    buffer.getChannelData(0).set(result.pcmSamples);
+
+    // Create looping source
+    this.bufferSourceNode = this.audioCtx.createBufferSource();
+    this.bufferSourceNode.buffer = buffer;
+    this.bufferSourceNode.loop = true;
+    this.bufferSourceNode.connect(this.synthGainNode);
+    this.bufferSourceNode.start();
+
+    this.lastBufferPreview = new Float32Array(result.preview);
+
+    const targetGain = this.isMuted() ? 0 : 0.5;
     this.synthGainNode.gain.setTargetAtTime(
       targetGain,
       this.audioCtx.currentTime,
@@ -390,6 +403,30 @@ export class CameraVisualizerPage implements OnDestroy {
         0.05
       );
     }
+
+    if (this.bufferSourceNode) {
+      try {
+        this.bufferSourceNode.stop(
+          (this.audioCtx?.currentTime ?? 0) + 0.1
+        );
+      } catch { /* ok */ }
+      this.bufferSourceNode = null;
+      this.lastBufferPreview = new Float32Array(0);
+    }
+  }
+
+  private cosineSimilarity(a: Float32Array, b: Float32Array): number {
+    let dot = 0;
+    let ea = 0;
+    let eb = 0;
+    const len = Math.min(a.length, b.length);
+    for (let i = 0; i < len; i++) {
+      dot += a[i] * b[i];
+      ea += a[i] * a[i];
+      eb += b[i] * b[i];
+    }
+    const denom = Math.sqrt(ea * eb) || 1;
+    return dot / denom;
   }
 
   private compareWithLoadedPreview(preview: Float32Array): number {

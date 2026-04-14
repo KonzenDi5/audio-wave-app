@@ -4,9 +4,8 @@ import { Injectable, inject } from '@angular/core';
 export interface WaveDecodeResult {
   confidence: number;
   preview: Float32Array;
-  fftReal: Float32Array;
-  fftImag: Float32Array;
-  baseFreq: number;
+  pcmSamples: Float32Array;
+  sampleRate: number;
 }
 
 interface PyodideWindow extends Window {
@@ -52,21 +51,31 @@ export class PythonWaveDecoderService {
       const raw = JSON.parse(payload) as {
         confidence: number;
         preview: number[];
-        fft_real: number[];
-        fft_imag: number[];
-        base_freq: number;
+        pcm_b64: string;
+        sample_rate: number;
       };
 
-      if (!raw.preview.length || raw.confidence < 0.4) {
+      if (!raw.preview.length || raw.confidence < 0.4 || !raw.pcm_b64) {
         return null;
+      }
+
+      // Decode base64 PCM (int16) → Float32Array
+      const binaryStr = atob(raw.pcm_b64);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+      const int16 = new Int16Array(bytes.buffer);
+      const pcm = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) {
+        pcm[i] = int16[i] / 32767;
       }
 
       return {
         confidence: raw.confidence,
         preview: Float32Array.from(raw.preview),
-        fftReal: Float32Array.from(raw.fft_real),
-        fftImag: Float32Array.from(raw.fft_imag),
-        baseFreq: raw.base_freq,
+        pcmSamples: pcm,
+        sampleRate: raw.sample_rate,
       };
     } catch {
       return null;
