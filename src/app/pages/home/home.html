@@ -10,6 +10,25 @@
     <p class="subtitle">Importe um arquivo de áudio e visualize suas ondas sonoras</p>
   </header>
 
+  <!-- Quick Actions -->
+  <div class="quick-actions">
+    <a class="action-card" routerLink="/camera">
+      <div class="action-icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+          <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="12" cy="13" r="4" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+      </div>
+      <div class="action-text">
+        <span class="action-title">Wave Camera</span>
+        <span class="action-desc">Ondas em tempo real</span>
+      </div>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" class="action-arrow">
+        <path d="M9 18l6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </a>
+  </div>
+
   <!-- Upload Area -->
   @if (!audioService.isLoaded()) {
     <div
@@ -87,6 +106,9 @@
           </svg>
         </button>
       </div>
+
+      <!-- Wave Export -->
+      <app-wave-export [waveformData]="waveformData()" [fileName]="audioService.fileName()" />
     </div>
   }
 </div>

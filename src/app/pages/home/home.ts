@@ -1,10 +1,12 @@
 import { Component, inject, signal } from '@angular/core';
+import { RouterLink } from '@angular/router';
 import { AudioVisualizerComponent } from '../../components/audio-visualizer/audio-visualizer';
+import { WaveExportComponent } from '../../components/wave-export/wave-export';
 import { AudioService } from '../../services/audio';
 
 @Component({
   selector: 'app-home',
-  imports: [AudioVisualizerComponent],
+  imports: [AudioVisualizerComponent, WaveExportComponent, RouterLink],
   templateUrl: './home.html',
   styleUrl: './home.scss',
 })
