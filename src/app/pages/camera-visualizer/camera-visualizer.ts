@@ -46,13 +46,28 @@ export class CameraVisualizerPage implements OnDestroy {
         audio: true,
       });
 
-      // Set video source
+      // Set video source — wait for metadata before playing (required by iOS Safari)
       const video = this.videoRef.nativeElement;
+      video.setAttribute('autoplay', '');
+      video.setAttribute('playsinline', '');
+      video.setAttribute('muted', '');
       video.srcObject = this.mediaStream;
+
+      await new Promise<void>((resolve, reject) => {
+        video.onloadedmetadata = () => resolve();
+        video.onerror = () => reject(video.error);
+        // Safety timeout for edge cases
+        setTimeout(() => resolve(), 3000);
+      });
+
       await video.play();
 
-      // Setup audio analysis
+      // Setup audio analysis — resume context for iOS Safari
       this.audioContext = new AudioContext();
+      if (this.audioContext.state === 'suspended') {
+        await this.audioContext.resume();
+      }
+
       const source = this.audioContext.createMediaStreamSource(this.mediaStream);
       this.analyser = this.audioContext.createAnalyser();
       this.analyser.fftSize = 2048;
@@ -64,10 +79,14 @@ export class CameraVisualizerPage implements OnDestroy {
       this.isActive.set(true);
       this.ngZone.runOutsideAngular(() => this.animate());
     } catch (err) {
+      // Stop any tracks that were acquired if setup fails
+      this.mediaStream?.getTracks().forEach((t) => t.stop());
+      this.mediaStream = null;
+
       const msg =
         err instanceof DOMException && err.name === 'NotAllowedError'
           ? 'Permissão negada. Habilite câmera e microfone nas configurações.'
-          : 'Não foi possível acessar câmera/microfone.';
+          : 'Não foi possível acessar câmera/microfone. Verifique se o navegador tem permissão.';
       this.hasError.set(msg);
     }
   }
