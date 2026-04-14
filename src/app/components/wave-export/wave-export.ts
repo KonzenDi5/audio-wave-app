@@ -138,8 +138,8 @@ export class WaveExportComponent implements AfterViewInit {
     // Onda circular
     this.drawCircularWave(ctx, w, h, data, style);
 
-    // Borda legível pela câmera integrada à arte
-    this.drawReadableWaveRing(ctx, w, h, data, style);
+    // Faixa horizontal com a onda legível pela câmera
+    this.drawHorizontalWaveStrip(ctx, w, h, data, style);
 
     // Título
     const name = this.fileName() || 'Audio Wave';
@@ -158,56 +158,109 @@ export class WaveExportComponent implements AfterViewInit {
     ctx.fillText('Audio Wave App', w / 2, h * 0.975);
   }
 
-  private drawReadableWaveRing(
+  private drawHorizontalWaveStrip(
     ctx: CanvasRenderingContext2D,
     w: number,
     h: number,
     data: Float32Array,
     style: WaveStyle
   ): void {
-    const centerX = w / 2;
-    const centerY = h / 2;
-    const ringBaseRadius = w * 0.368;
-    const ringAmplitude = w * 0.05;
-    const guideColor = style === 'minimal' ? '#22c55e' : '#4ade80';
     const samples = sampleWaveform(data, PREVIEW_SAMPLE_COUNT);
-    const angleStep = (Math.PI * 2) / samples.length;
+    const colors = this.styles.find((s) => s.key === style)!.colors;
+    const guideColor = style === 'minimal' ? '#22c55e' : '#4ade80';
+
+    const padX = w * 0.06;
+    const stripTop = h * 0.76;
+    const stripHeight = h * 0.13;
+    const stripBottom = stripTop + stripHeight;
+    const centerY = stripTop + stripHeight / 2;
+    const drawWidth = w - padX * 2;
+    const halfAmplitude = stripHeight * 0.42;
 
     ctx.save();
-    ctx.strokeStyle = style === 'minimal' ? 'rgba(34, 197, 94, 0.28)' : 'rgba(74, 222, 128, 0.22)';
-    ctx.lineWidth = Math.max(1, w * 0.0025);
+
+    // Fundo escuro da faixa
+    ctx.fillStyle = style === 'minimal' ? 'rgba(241, 245, 249, 0.95)' : 'rgba(0, 0, 0, 0.82)';
+    ctx.fillRect(padX - 6, stripTop - 6, drawWidth + 12, stripHeight + 12);
+
+    // Linhas-guia superior e inferior (detecção pela câmera)
+    ctx.strokeStyle = guideColor;
+    ctx.lineWidth = Math.max(2, w * 0.003);
     ctx.beginPath();
-    ctx.arc(centerX, centerY, ringBaseRadius, 0, Math.PI * 2);
+    ctx.moveTo(padX, stripTop);
+    ctx.lineTo(padX + drawWidth, stripTop);
     ctx.stroke();
 
-    ctx.shadowColor = guideColor;
-    ctx.shadowBlur = style === 'minimal' ? 0 : 18;
-    ctx.strokeStyle = guideColor;
-    ctx.lineWidth = Math.max(2, w * 0.0032);
+    ctx.beginPath();
+    ctx.moveTo(padX, stripBottom);
+    ctx.lineTo(padX + drawWidth, stripBottom);
+    ctx.stroke();
 
-    for (let index = 0; index < samples.length; index++) {
-      const angle = index * angleStep - Math.PI / 2;
-      const sample = samples[index];
-      const startRadius = ringBaseRadius;
-      const endRadius = ringBaseRadius + sample * ringAmplitude;
+    // Linha central de referência (sutil)
+    ctx.strokeStyle = style === 'minimal' ? 'rgba(34, 197, 94, 0.2)' : 'rgba(74, 222, 128, 0.15)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padX, centerY);
+    ctx.lineTo(padX + drawWidth, centerY);
+    ctx.stroke();
 
-      ctx.beginPath();
-      ctx.moveTo(
-        centerX + Math.cos(angle) * startRadius,
-        centerY + Math.sin(angle) * startRadius
-      );
-      ctx.lineTo(
-        centerX + Math.cos(angle) * endRadius,
-        centerY + Math.sin(angle) * endRadius
-      );
-      ctx.stroke();
+    // Marcadores de alinhamento nos cantos
+    ctx.fillStyle = guideColor;
+    const ms = w * 0.008;
+    ctx.fillRect(padX - ms, stripTop - ms, ms * 2, ms * 2);
+    ctx.fillRect(padX + drawWidth - ms, stripTop - ms, ms * 2, ms * 2);
+    ctx.fillRect(padX - ms, stripBottom - ms, ms * 2, ms * 2);
+    ctx.fillRect(padX + drawWidth - ms, stripBottom - ms, ms * 2, ms * 2);
+
+    // Glow
+    if (style !== 'minimal') {
+      ctx.shadowColor = guideColor;
+      ctx.shadowBlur = 12;
     }
 
-    // Marcador discreto de orientação para estabilizar a leitura
-    ctx.fillStyle = guideColor;
+    // Preenchimento superior
+    const gradient = ctx.createLinearGradient(padX, stripTop, padX + drawWidth, stripTop);
+    gradient.addColorStop(0, colors[0]);
+    gradient.addColorStop(1, colors[1]);
+
     ctx.beginPath();
-    ctx.arc(centerX, centerY - ringBaseRadius - w * 0.018, w * 0.008, 0, Math.PI * 2);
+    ctx.moveTo(padX, centerY);
+    for (let i = 0; i < samples.length; i++) {
+      const x = padX + (i / (samples.length - 1)) * drawWidth;
+      const y = centerY - Math.max(0, samples[i]) * halfAmplitude;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(padX + drawWidth, centerY);
+    ctx.closePath();
+    ctx.fillStyle = style === 'minimal' ? 'rgba(34, 197, 94, 0.12)' : `${colors[0]}1A`;
     ctx.fill();
+
+    // Preenchimento inferior
+    ctx.beginPath();
+    ctx.moveTo(padX, centerY);
+    for (let i = 0; i < samples.length; i++) {
+      const x = padX + (i / (samples.length - 1)) * drawWidth;
+      const y = centerY - Math.min(0, samples[i]) * halfAmplitude;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(padX + drawWidth, centerY);
+    ctx.closePath();
+    ctx.fillStyle = style === 'minimal' ? 'rgba(34, 197, 94, 0.12)' : `${colors[0]}1A`;
+    ctx.fill();
+
+    // Linha principal da onda
+    ctx.strokeStyle = guideColor;
+    ctx.lineWidth = Math.max(3, w * 0.004);
+    ctx.beginPath();
+    for (let i = 0; i < samples.length; i++) {
+      const x = padX + (i / (samples.length - 1)) * drawWidth;
+      const y = centerY - samples[i] * halfAmplitude;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    ctx.shadowBlur = 0;
     ctx.restore();
   }
 

@@ -10,11 +10,11 @@ import {
 import { RouterLink } from '@angular/router';
 
 import { AudioService } from '../../services/audio';
-import { PythonWaveDecoderService } from '../../services/python-wave-decoder';
 import {
-  PREVIEW_SAMPLE_COUNT,
-  createOverlayAmplitudes,
-} from '../../shared/wave-payload';
+  PythonWaveDecoderService,
+  WaveDecodeResult,
+} from '../../services/python-wave-decoder';
+import { createOverlayAmplitudes } from '../../shared/wave-payload';
 
 @Component({
   selector: 'app-camera-visualizer',
@@ -37,19 +37,12 @@ export class CameraVisualizerPage implements OnDestroy {
   private lastDetectedPreview: Float32Array<ArrayBufferLike> = new Float32Array(0);
   private isDecodingFrame = false;
 
-  // Dados exibidos no overlay a partir do payload lido da imagem
   private waveAmplitudes: number[] = [];
 
-  // Síntese de fallback via wavetable para quando o áudio original não está carregado
+  // Síntese via PeriodicWave (Python FFT)
   private audioCtx: AudioContext | null = null;
-  private scriptNode: ScriptProcessorNode | null = null;
-  private gainNode: GainNode | null = null;
-  private readonly wavetableSize = 2048;
-  private currentWavetable = new Float32Array(this.wavetableSize);
-  private targetWavetable = new Float32Array(this.wavetableSize);
-  private playbackPhase = 0;
-  private baseFrequency = 220;
-  private fadeGain = 0;
+  private oscillatorNode: OscillatorNode | null = null;
+  private synthGainNode: GainNode | null = null;
 
   readonly isActive = signal(false);
   readonly isDetected = signal(false);
@@ -133,8 +126,12 @@ export class CameraVisualizerPage implements OnDestroy {
   toggleMute(): void {
     const nextMuted = !this.isMuted();
     this.isMuted.set(nextMuted);
-    if (this.gainNode) {
-      this.gainNode.gain.value = nextMuted ? 0 : 0.5;
+    if (this.synthGainNode && this.audioCtx) {
+      this.synthGainNode.gain.setTargetAtTime(
+        nextMuted ? 0 : 0.4,
+        this.audioCtx.currentTime,
+        0.05
+      );
     }
     this.audioService.setMuted(nextMuted);
   }
@@ -191,66 +188,28 @@ export class CameraVisualizerPage implements OnDestroy {
       this.audioCtx = new AudioCtor();
       await this.audioCtx.resume();
 
-      this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = this.isMuted() ? 0 : 0.5;
-      this.gainNode.connect(this.audioCtx.destination);
-
-      this.scriptNode = this.audioCtx.createScriptProcessor(2048, 0, 1);
-      this.currentWavetable.fill(0);
-      this.targetWavetable.fill(0);
-      this.playbackPhase = 0;
-      this.fadeGain = 0;
-
-      const sampleRate = this.audioCtx.sampleRate;
-      this.scriptNode.onaudioprocess = (event: AudioProcessingEvent) => {
-        const output = event.outputBuffer.getChannelData(0);
-
-        for (let index = 0; index < this.currentWavetable.length; index++) {
-          this.currentWavetable[index] +=
-            (this.targetWavetable[index] - this.currentWavetable[index]) * 0.04;
-        }
-
-        const targetFade = this.playbackMode() === 'preview' ? 1 : 0;
-        const phaseIncrement = (this.wavetableSize * this.baseFrequency) / sampleRate;
-
-        for (let index = 0; index < output.length; index++) {
-          this.fadeGain += (targetFade - this.fadeGain) * 0.0012;
-
-          const position = Math.floor(this.playbackPhase);
-          const fraction = this.playbackPhase - position;
-          const sampleA = this.currentWavetable[position % this.wavetableSize];
-          const sampleB = this.currentWavetable[(position + 1) % this.wavetableSize];
-
-          output[index] = (sampleA + (sampleB - sampleA) * fraction) * this.fadeGain;
-
-          this.playbackPhase += phaseIncrement;
-          if (this.playbackPhase >= this.wavetableSize) {
-            this.playbackPhase -= this.wavetableSize;
-          }
-        }
-      };
-
-      this.scriptNode.connect(this.gainNode);
+      this.synthGainNode = this.audioCtx.createGain();
+      this.synthGainNode.gain.value = 0;
+      this.synthGainNode.connect(this.audioCtx.destination);
     } catch (err) {
       console.warn('Não foi possível inicializar áudio:', err);
     }
   }
 
   private destroyAudio(): void {
-    this.scriptNode?.disconnect();
-    this.scriptNode = null;
-    this.gainNode?.disconnect();
-    this.gainNode = null;
+    if (this.oscillatorNode) {
+      try { this.oscillatorNode.stop(); } catch { /* já parado */ }
+      this.oscillatorNode.disconnect();
+      this.oscillatorNode = null;
+    }
+
+    this.synthGainNode?.disconnect();
+    this.synthGainNode = null;
 
     if (this.audioCtx) {
       void this.audioCtx.close();
       this.audioCtx = null;
     }
-
-    this.currentWavetable.fill(0);
-    this.targetWavetable.fill(0);
-    this.playbackPhase = 0;
-    this.fadeGain = 0;
   }
 
   private animate(): void {
@@ -313,15 +272,14 @@ export class CameraVisualizerPage implements OnDestroy {
 
     try {
       const imageData = this.scanCtx!.getImageData(0, 0, scanWidth, scanHeight);
-      const pythonPreview = await this.pythonWaveDecoder.decodeFrame(
+      const result = await this.pythonWaveDecoder.decodeFrame(
         imageData.data,
         scanWidth,
         scanHeight
       );
-      const preview = pythonPreview ?? this.extractPreviewWave(imageData.data, scanWidth, scanHeight);
 
-      if (preview) {
-        this.applyPreview(preview);
+      if (result) {
+        this.applyDecoded(result);
         return;
       }
 
@@ -331,17 +289,17 @@ export class CameraVisualizerPage implements OnDestroy {
     }
   }
 
-  private applyPreview(preview: Float32Array): void {
-    this.lastDetectedPreview = preview;
-    this.waveAmplitudes = createOverlayAmplitudes(preview, 180);
+  private applyDecoded(result: WaveDecodeResult): void {
+    this.lastDetectedPreview = result.preview;
+    this.waveAmplitudes = createOverlayAmplitudes(result.preview, 180);
 
     if (!this.isDetected()) {
       this.ngZone.run(() => this.isDetected.set(true));
     }
 
-    const similarity = this.compareWithLoadedPreview(preview);
-    if (similarity >= 0.9) {
-      this.targetWavetable.fill(0);
+    const similarity = this.compareWithLoadedPreview(result.preview);
+    if (similarity >= 0.7) {
+      this.stopSynthesis();
       if (!this.usingSessionAudio || !this.audioService.isPlaying()) {
         this.audioService.play();
       }
@@ -361,8 +319,7 @@ export class CameraVisualizerPage implements OnDestroy {
       this.usingSessionAudio = false;
     }
 
-    this.updateTargetWavetable(preview);
-    this.baseFrequency = this.estimateBaseFrequency(preview);
+    this.startSynthesis(result);
 
     if (this.playbackMode() !== 'preview' || !this.isPlayingAudio()) {
       this.ngZone.run(() => {
@@ -375,7 +332,7 @@ export class CameraVisualizerPage implements OnDestroy {
   private clearDetection(): void {
     this.waveAmplitudes = [];
     this.lastDetectedPreview = new Float32Array(0);
-    this.targetWavetable.fill(0);
+    this.stopSynthesis();
 
     if (this.usingSessionAudio) {
       this.audioService.stop();
@@ -391,90 +348,48 @@ export class CameraVisualizerPage implements OnDestroy {
     }
   }
 
-  private extractPreviewWave(
-    pixels: Uint8ClampedArray,
-    width: number,
-    height: number
-  ): Float32Array | null {
-    let totalX = 0;
-    let totalY = 0;
-    let pixelCount = 0;
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const index = (y * width + x) * 4;
-        const r = pixels[index];
-        const g = pixels[index + 1];
-        const b = pixels[index + 2];
-
-        if (!this.isReadableWavePixel(r, g, b)) {
-          continue;
-        }
-
-        totalX += x;
-        totalY += y;
-        pixelCount += 1;
-      }
+  private startSynthesis(result: WaveDecodeResult): void {
+    if (!this.audioCtx || !this.synthGainNode) {
+      return;
     }
 
-    if (pixelCount < 120) {
-      return null;
+    const real = new Float32Array(result.fftReal);
+    const imag = new Float32Array(result.fftImag);
+    const wave = this.audioCtx.createPeriodicWave(real, imag, {
+      disableNormalization: false,
+    });
+
+    if (this.oscillatorNode) {
+      this.oscillatorNode.setPeriodicWave(wave);
+      this.oscillatorNode.frequency.setTargetAtTime(
+        result.baseFreq,
+        this.audioCtx.currentTime,
+        0.05
+      );
+    } else {
+      this.oscillatorNode = this.audioCtx.createOscillator();
+      this.oscillatorNode.setPeriodicWave(wave);
+      this.oscillatorNode.frequency.value = result.baseFreq;
+      this.oscillatorNode.connect(this.synthGainNode);
+      this.oscillatorNode.start();
     }
 
-    const centerX = totalX / pixelCount;
-    const centerY = totalY / pixelCount;
-    const distances: number[] = [];
+    const targetGain = this.isMuted() ? 0 : 0.4;
+    this.synthGainNode.gain.setTargetAtTime(
+      targetGain,
+      this.audioCtx.currentTime,
+      0.08
+    );
+  }
 
-    for (let index = 0; index < PREVIEW_SAMPLE_COUNT; index++) {
-      const angle = (index / PREVIEW_SAMPLE_COUNT) * Math.PI * 2 - Math.PI / 2;
-      let farthestDistance = 0;
-
-      for (let radius = 10; radius < Math.min(width, height) * 0.48; radius += 1) {
-        const sampleX = Math.round(centerX + Math.cos(angle) * radius);
-        const sampleY = Math.round(centerY + Math.sin(angle) * radius);
-
-        if (sampleX < 0 || sampleX >= width || sampleY < 0 || sampleY >= height) {
-          break;
-        }
-
-        const pixelIndex = (sampleY * width + sampleX) * 4;
-        if (
-          this.isReadableWavePixel(
-            pixels[pixelIndex],
-            pixels[pixelIndex + 1],
-            pixels[pixelIndex + 2]
-          )
-        ) {
-          farthestDistance = radius;
-        }
-      }
-
-      distances.push(farthestDistance);
+  private stopSynthesis(): void {
+    if (this.synthGainNode && this.audioCtx) {
+      this.synthGainNode.gain.setTargetAtTime(
+        0,
+        this.audioCtx.currentTime,
+        0.05
+      );
     }
-
-    const validCount = distances.filter((distance) => distance > 0).length;
-    if (validCount < PREVIEW_SAMPLE_COUNT * 0.72) {
-      return null;
-    }
-
-    const smoothedDistances = this.gaussianSmooth(distances, 4);
-    const meanRadius = smoothedDistances.reduce((sum, value) => sum + value, 0) / smoothedDistances.length;
-    let peakDelta = 0;
-
-    for (let index = 0; index < smoothedDistances.length; index++) {
-      peakDelta = Math.max(peakDelta, Math.abs(smoothedDistances[index] - meanRadius));
-    }
-
-    if (peakDelta < 3) {
-      return null;
-    }
-
-    const preview = new Float32Array(PREVIEW_SAMPLE_COUNT);
-    for (let index = 0; index < smoothedDistances.length; index++) {
-      preview[index] = this.clamp((smoothedDistances[index] - meanRadius) / peakDelta, -1, 1);
-    }
-
-    return preview;
   }
 
   private compareWithLoadedPreview(preview: Float32Array): number {
@@ -507,145 +422,80 @@ export class CameraVisualizerPage implements OnDestroy {
     return best;
   }
 
-  private isReadableWavePixel(r: number, g: number, b: number): boolean {
-    return g > 72 && g > r * 1.18 && g > b * 1.08;
-  }
-
-  private gaussianSmooth(data: number[], radius: number): number[] {
-    const result: number[] = [];
-    const sigma = radius / 2;
-    const weights: number[] = [];
-    let weightSum = 0;
-
-    for (let offset = -radius; offset <= radius; offset++) {
-      const weight = Math.exp(-(offset * offset) / (2 * sigma * sigma));
-      weights.push(weight);
-      weightSum += weight;
-    }
-
-    for (let index = 0; index < data.length; index++) {
-      let sum = 0;
-      for (let offset = -radius; offset <= radius; offset++) {
-        const sampleIndex = (index + offset + data.length) % data.length;
-        sum += data[sampleIndex] * weights[offset + radius];
-      }
-      result.push(sum / weightSum);
-    }
-
-    return result;
-  }
-
-  private clamp(value: number, min: number, max: number): number {
-    return Math.min(max, Math.max(min, value));
-  }
-
-  private updateTargetWavetable(preview: Float32Array): void {
-    if (!preview.length) {
-      this.targetWavetable.fill(0);
-      return;
-    }
-
-    for (let index = 0; index < this.wavetableSize; index++) {
-      const position = (index / this.wavetableSize) * preview.length;
-      const baseIndex = Math.floor(position);
-      const fraction = position - baseIndex;
-      const sampleA = preview[baseIndex % preview.length];
-      const sampleB = preview[(baseIndex + 1) % preview.length];
-      this.targetWavetable[index] = sampleA + (sampleB - sampleA) * fraction;
-    }
-
-    let dcOffset = 0;
-    for (let index = 0; index < this.wavetableSize; index++) {
-      dcOffset += this.targetWavetable[index];
-    }
-    dcOffset /= this.wavetableSize;
-
-    let peak = 0;
-    for (let index = 0; index < this.wavetableSize; index++) {
-      this.targetWavetable[index] -= dcOffset;
-      peak = Math.max(peak, Math.abs(this.targetWavetable[index]));
-    }
-
-    if (peak > 0) {
-      for (let index = 0; index < this.wavetableSize; index++) {
-        this.targetWavetable[index] /= peak;
-      }
-    }
-  }
-
-  private estimateBaseFrequency(preview: Float32Array): number {
-    if (preview.length < 8) {
-      return 220;
-    }
-
-    let zeroCrossings = 0;
-    for (let index = 1; index < preview.length; index++) {
-      const previous = preview[index - 1];
-      const current = preview[index];
-      if ((previous <= 0 && current > 0) || (previous >= 0 && current < 0)) {
-        zeroCrossings += 1;
-      }
-    }
-
-    const normalized = zeroCrossings / preview.length;
-    const estimated = 140 + normalized * 320;
-    return Math.min(440, Math.max(140, estimated));
-  }
-
   private drawDetectedWave(ctx: CanvasRenderingContext2D, width: number, height: number): void {
     const amplitudes = this.waveAmplitudes;
-    const centerX = width / 2;
-    const centerY = height / 2;
-    const maxAmplitude = Math.max(...amplitudes, 1);
-    const displayRadius = Math.min(width, height) * 0.35;
+    if (!amplitudes.length) return;
+
+    const padX = width * 0.06;
+    const centerY = height * 0.5;
+    const drawWidth = width - padX * 2;
+    const maxAmp = Math.max(...amplitudes, 0.01);
+    const halfHeight = height * 0.18;
 
     ctx.shadowColor = '#4ade80';
-    ctx.shadowBlur = 25;
+    ctx.shadowBlur = 20;
 
-    const gradient = ctx.createLinearGradient(
-      centerX - displayRadius,
-      centerY,
-      centerX + displayRadius,
-      centerY
-    );
-    gradient.addColorStop(0, 'rgba(74, 222, 128, 0.9)');
-    gradient.addColorStop(0.5, 'rgba(34, 197, 94, 0.9)');
-    gradient.addColorStop(1, 'rgba(74, 222, 128, 0.9)');
+    const gradient = ctx.createLinearGradient(padX, 0, padX + drawWidth, 0);
+    gradient.addColorStop(0, 'rgba(74, 222, 128, 0.85)');
+    gradient.addColorStop(0.5, 'rgba(34, 197, 94, 0.85)');
+    gradient.addColorStop(1, 'rgba(74, 222, 128, 0.85)');
 
+    // Preenchimento espelhado
+    ctx.fillStyle = 'rgba(34, 197, 94, 0.05)';
+    ctx.beginPath();
+    ctx.moveTo(padX, centerY);
+    for (let i = 0; i < amplitudes.length; i++) {
+      const x = padX + (i / (amplitudes.length - 1)) * drawWidth;
+      const h = (amplitudes[i] / maxAmp) * halfHeight;
+      ctx.lineTo(x, centerY - h);
+    }
+    for (let i = amplitudes.length - 1; i >= 0; i--) {
+      const x = padX + (i / (amplitudes.length - 1)) * drawWidth;
+      const h = (amplitudes[i] / maxAmp) * halfHeight * 0.5;
+      ctx.lineTo(x, centerY + h);
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    // Linha superior
     ctx.strokeStyle = gradient;
     ctx.lineWidth = 2.5;
     ctx.beginPath();
-
-    for (let index = 0; index <= amplitudes.length; index++) {
-      const angle = (index / amplitudes.length) * Math.PI * 2 - Math.PI / 2;
-      const normalizedAmplitude = amplitudes[index % amplitudes.length] / maxAmplitude;
-      const radius = displayRadius * 0.3 + normalizedAmplitude * displayRadius * 0.7;
-      const x = centerX + Math.cos(angle) * radius;
-      const y = centerY + Math.sin(angle) * radius;
-
-      if (index === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
+    for (let i = 0; i < amplitudes.length; i++) {
+      const x = padX + (i / (amplitudes.length - 1)) * drawWidth;
+      const h = (amplitudes[i] / maxAmp) * halfHeight;
+      if (i === 0) ctx.moveTo(x, centerY - h);
+      else ctx.lineTo(x, centerY - h);
     }
-
-    ctx.closePath();
     ctx.stroke();
 
-    ctx.fillStyle = 'rgba(34, 197, 94, 0.05)';
-    ctx.fill();
+    // Linha inferior (espelho sutil)
+    ctx.globalAlpha = 0.4;
+    ctx.beginPath();
+    for (let i = 0; i < amplitudes.length; i++) {
+      const x = padX + (i / (amplitudes.length - 1)) * drawWidth;
+      const h = (amplitudes[i] / maxAmp) * halfHeight * 0.5;
+      if (i === 0) ctx.moveTo(x, centerY + h);
+      else ctx.lineTo(x, centerY + h);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1.0;
 
     ctx.shadowBlur = 0;
+
+    // Linha central de referência
+    ctx.strokeStyle = 'rgba(74, 222, 128, 0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padX, centerY);
+    ctx.lineTo(padX + drawWidth, centerY);
+    ctx.stroke();
+
+    // Rótulo
     ctx.fillStyle = 'rgba(34, 197, 94, 0.92)';
     ctx.font = `bold ${width * 0.03}px Inter, sans-serif`;
     ctx.textAlign = 'center';
-    ctx.fillText(this.overlayLabel(), centerX, height * 0.06);
-
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, 4, 0, Math.PI * 2);
-    ctx.fillStyle = '#4ade80';
-    ctx.fill();
+    ctx.fillText(this.overlayLabel(), width / 2, height * 0.06);
   }
 
   private overlayLabel(): string {
@@ -654,9 +504,9 @@ export class CameraVisualizerPage implements OnDestroy {
     }
 
     if (this.playbackMode() === 'preview') {
-      return '♪ PRÉVIA EMBUTIDA';
+      return '♪ ONDA DETECTADA';
     }
 
-    return 'QR DETECTADO';
+    return '';
   }
 }

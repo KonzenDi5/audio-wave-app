@@ -1,9 +1,12 @@
 import { DOCUMENT } from '@angular/common';
 import { Injectable, inject } from '@angular/core';
 
-interface PythonWaveDecoderResult {
+export interface WaveDecodeResult {
   confidence: number;
-  preview: number[];
+  preview: Float32Array;
+  fftReal: Float32Array;
+  fftImag: Float32Array;
+  baseFreq: number;
 }
 
 interface PyodideWindow extends Window {
@@ -16,6 +19,7 @@ interface PyodideGlobals {
 
 interface PyodideInstance {
   globals: PyodideGlobals;
+  loadPackage(pkg: string | string[]): Promise<void>;
   runPythonAsync<T>(code: string): Promise<T>;
 }
 
@@ -30,7 +34,7 @@ export class PythonWaveDecoderService {
     pixels: Uint8ClampedArray,
     width: number,
     height: number
-  ): Promise<Float32Array | null> {
+  ): Promise<WaveDecodeResult | null> {
     const pyodide = await this.getPyodide();
     if (!pyodide) {
       return null;
@@ -41,17 +45,29 @@ export class PythonWaveDecoderService {
       pyodide.globals.set('frame_width', width);
       pyodide.globals.set('frame_height', height);
 
-      const payload = await pyodide.runPythonAsync<string>(`
-import json
-json.dumps(decode_wave_frame(frame_pixels, frame_width, frame_height))
-      `);
+      const payload = await pyodide.runPythonAsync<string>(
+        'decode_wave_frame(frame_pixels, frame_width, frame_height)'
+      );
 
-      const result = JSON.parse(payload) as PythonWaveDecoderResult;
-      if (!result.preview.length || result.confidence < 0.72) {
+      const raw = JSON.parse(payload) as {
+        confidence: number;
+        preview: number[];
+        fft_real: number[];
+        fft_imag: number[];
+        base_freq: number;
+      };
+
+      if (!raw.preview.length || raw.confidence < 0.4) {
         return null;
       }
 
-      return Float32Array.from(result.preview);
+      return {
+        confidence: raw.confidence,
+        preview: Float32Array.from(raw.preview),
+        fftReal: Float32Array.from(raw.fft_real),
+        fftImag: Float32Array.from(raw.fft_imag),
+        baseFreq: raw.base_freq,
+      };
     } catch {
       return null;
     }
@@ -61,7 +77,6 @@ json.dumps(decode_wave_frame(frame_pixels, frame_width, frame_height))
     if (!this.pyodidePromise) {
       this.pyodidePromise = this.loadPyodideRuntime();
     }
-
     return this.pyodidePromise;
   }
 
@@ -85,100 +100,110 @@ json.dumps(decode_wave_frame(frame_pixels, frame_width, frame_height))
       indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.27.5/full/',
     });
 
+    await pyodide.loadPackage('numpy');
+
     await pyodide.runPythonAsync(`
-import math
+import numpy as np
+import json
 
-PREVIEW_SAMPLE_COUNT = 384
+SAMPLE_COUNT = 384
 
-def _is_wave_pixel(r, g, b):
-    return g > 72 and g > r * 1.18 and g > b * 1.08
+def decode_wave_frame(pixels_js, w, h):
+    empty = json.dumps({
+        'confidence': 0,
+        'preview': [],
+        'fft_real': [],
+        'fft_imag': [],
+        'base_freq': 220
+    })
 
-def _gaussian_smooth(data, radius):
-    sigma = radius / 2
-    weights = []
-    weight_sum = 0.0
-    for offset in range(-radius, radius + 1):
-        weight = math.exp(-(offset * offset) / (2 * sigma * sigma))
-        weights.append(weight)
-        weight_sum += weight
+    buf = pixels_js.to_py()
+    px = np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 4)
 
-    result = []
-    length = len(data)
-    for index in range(length):
-        total = 0.0
-        for offset in range(-radius, radius + 1):
-            sample_index = (index + offset + length) % length
-            total += data[sample_index] * weights[offset + radius]
-        result.append(total / weight_sum)
-    return result
+    r = px[:, :, 0].astype(np.int16)
+    g = px[:, :, 1].astype(np.int16)
+    b = px[:, :, 2].astype(np.int16)
 
-def decode_wave_frame(frame_pixels, frame_width, frame_height):
-    total_x = 0.0
-    total_y = 0.0
-    pixel_count = 0
+    green = (g > 80) & (g > (r + r // 5)) & (g > (b + b // 10))
 
-    for y in range(frame_height):
-        row_offset = y * frame_width * 4
-        for x in range(frame_width):
-            pixel_offset = row_offset + x * 4
-            r = frame_pixels[pixel_offset]
-            g = frame_pixels[pixel_offset + 1]
-            b = frame_pixels[pixel_offset + 2]
-            if not _is_wave_pixel(r, g, b):
-                continue
-            total_x += x
-            total_y += y
-            pixel_count += 1
+    row_counts = np.sum(green, axis=1)
+    guide_rows = np.where(row_counts > w * 0.30)[0]
 
-    if pixel_count < 120:
-        return {'confidence': 0.0, 'preview': []}
+    if len(guide_rows) < 2:
+        return empty
 
-    center_x = total_x / pixel_count
-    center_y = total_y / pixel_count
-    max_radius = min(frame_width, frame_height) * 0.48
-    distances = []
+    top = int(guide_rows[0])
+    bot = int(guide_rows[-1])
+    sh = bot - top
 
-    for index in range(PREVIEW_SAMPLE_COUNT):
-        angle = (index / PREVIEW_SAMPLE_COUNT) * math.pi * 2 - math.pi / 2
-        farthest_distance = 0.0
-        radius = 10.0
+    if sh < h * 0.04 or sh > h * 0.55:
+        return empty
 
-        while radius < max_radius:
-            sample_x = round(center_x + math.cos(angle) * radius)
-            sample_y = round(center_y + math.sin(angle) * radius)
+    cy = (top + bot) / 2.0
+    half_h = sh * 0.42
 
-            if sample_x < 0 or sample_x >= frame_width or sample_y < 0 or sample_y >= frame_height:
-                break
+    strip = green[top:bot + 1, :]
+    col_any = np.any(strip, axis=0)
+    gcols = np.where(col_any)[0]
 
-            pixel_offset = (sample_y * frame_width + sample_x) * 4
-            if _is_wave_pixel(
-                frame_pixels[pixel_offset],
-                frame_pixels[pixel_offset + 1],
-                frame_pixels[pixel_offset + 2],
-            ):
-                farthest_distance = radius
+    if len(gcols) < w * 0.12:
+        return empty
 
-            radius += 1.0
+    lx = int(gcols[0])
+    rx = int(gcols[-1])
+    dw = rx - lx
 
-        distances.append(farthest_distance)
+    if dw < w * 0.20:
+        return empty
 
-    valid_count = len([distance for distance in distances if distance > 0])
-    if valid_count < PREVIEW_SAMPLE_COUNT * 0.72:
-        return {'confidence': 0.0, 'preview': []}
+    samples = np.zeros(SAMPLE_COUNT, dtype=np.float64)
+    valid = 0
 
-    smoothed = _gaussian_smooth(distances, 4)
-    mean_radius = sum(smoothed) / len(smoothed)
-    peak_delta = max(abs(distance - mean_radius) for distance in smoothed)
-    if peak_delta < 3:
-        return {'confidence': 0.0, 'preview': []}
+    for i in range(SAMPLE_COUNT):
+        cx_i = lx + int(round(i / (SAMPLE_COUNT - 1) * dw))
+        cx_i = min(cx_i, w - 1)
 
-    preview = []
-    for distance in smoothed:
-        preview.append(max(-1.0, min(1.0, (distance - mean_radius) / peak_delta)))
+        col_g = green[top + 2:bot - 1, cx_i]
+        gpos = np.where(col_g)[0]
 
-    coverage = valid_count / PREVIEW_SAMPLE_COUNT
-    confidence = min(1.0, max(0.0, coverage * 0.7 + min(peak_delta / 12.0, 1.0) * 0.3))
-    return {'confidence': confidence, 'preview': preview}
+        if len(gpos) > 0:
+            med_y = float(np.median(gpos)) + top + 2
+            amp = (cy - med_y) / half_h
+            samples[i] = max(-1.0, min(1.0, amp))
+            valid += 1
+
+    if valid < SAMPLE_COUNT * 0.30:
+        return empty
+
+    kernel = np.array([0.06, 0.24, 0.4, 0.24, 0.06])
+    smoothed = np.convolve(samples, kernel, mode='same')
+
+    smoothed -= np.mean(smoothed)
+    peak = np.max(np.abs(smoothed))
+    if peak > 0.005:
+        smoothed = smoothed / peak
+
+    fft = np.fft.rfft(smoothed)
+    fft_r = np.real(fft)
+    fft_i = np.imag(fft)
+
+    crossings = 0
+    for i in range(1, len(smoothed)):
+        if smoothed[i - 1] * smoothed[i] < 0:
+            crossings += 1
+
+    cycles = max(1, crossings / 2)
+    base_freq = max(110.0, min(660.0, 55.0 * cycles))
+
+    conf = min(1.0, valid / SAMPLE_COUNT)
+
+    return json.dumps({
+        'confidence': round(float(conf), 4),
+        'preview': [round(float(v), 6) for v in smoothed],
+        'fft_real': [round(float(v), 6) for v in fft_r],
+        'fft_imag': [round(float(v), 6) for v in fft_i],
+        'base_freq': round(float(base_freq), 2)
+    })
     `);
 
     return pyodide;
