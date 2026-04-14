@@ -44,12 +44,17 @@ export function sampleWaveform(data: Float32Array, sampleCount = PREVIEW_SAMPLE_
     const start = Math.floor((index / sampleCount) * data.length);
     const end = Math.max(start + 1, Math.floor(((index + 1) / sampleCount) * data.length));
 
-    let sum = 0;
+    let peak = 0;
+    let peakAbs = 0;
     for (let sampleIndex = start; sampleIndex < end; sampleIndex++) {
-      sum += data[sampleIndex];
+      const abs = Math.abs(data[sampleIndex]);
+      if (abs > peakAbs) {
+        peakAbs = abs;
+        peak = data[sampleIndex];
+      }
     }
 
-    result[index] = sum / (end - start);
+    result[index] = peak;
   }
 
   return result;

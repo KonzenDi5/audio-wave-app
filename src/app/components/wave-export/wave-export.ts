@@ -166,26 +166,25 @@ export class WaveExportComponent implements AfterViewInit {
     style: WaveStyle
   ): void {
     const samples = sampleWaveform(data, PREVIEW_SAMPLE_COUNT);
-    const colors = this.styles.find((s) => s.key === style)!.colors;
     const guideColor = style === 'minimal' ? '#22c55e' : '#4ade80';
 
     const padX = w * 0.06;
-    const stripTop = h * 0.76;
-    const stripHeight = h * 0.13;
+    const stripTop = h * 0.74;
+    const stripHeight = h * 0.15;
     const stripBottom = stripTop + stripHeight;
     const centerY = stripTop + stripHeight / 2;
     const drawWidth = w - padX * 2;
-    const halfAmplitude = stripHeight * 0.42;
+    const halfAmplitude = stripHeight * 0.44;
 
     ctx.save();
 
     // Fundo escuro da faixa
-    ctx.fillStyle = style === 'minimal' ? 'rgba(241, 245, 249, 0.95)' : 'rgba(0, 0, 0, 0.82)';
-    ctx.fillRect(padX - 6, stripTop - 6, drawWidth + 12, stripHeight + 12);
+    ctx.fillStyle = style === 'minimal' ? 'rgba(241, 245, 249, 0.97)' : 'rgba(0, 0, 0, 0.90)';
+    ctx.fillRect(padX - 8, stripTop - 8, drawWidth + 16, stripHeight + 16);
 
-    // Linhas-guia superior e inferior (detecção pela câmera)
+    // Linhas-guia horizontais (verde puro para calibração)
     ctx.strokeStyle = guideColor;
-    ctx.lineWidth = Math.max(2, w * 0.003);
+    ctx.lineWidth = Math.max(3, w * 0.004);
     ctx.beginPath();
     ctx.moveTo(padX, stripTop);
     ctx.lineTo(padX + drawWidth, stripTop);
@@ -196,15 +195,15 @@ export class WaveExportComponent implements AfterViewInit {
     ctx.lineTo(padX + drawWidth, stripBottom);
     ctx.stroke();
 
-    // Linha central de referência (sutil)
-    ctx.strokeStyle = style === 'minimal' ? 'rgba(34, 197, 94, 0.2)' : 'rgba(74, 222, 128, 0.15)';
+    // Linha central sutil
+    ctx.strokeStyle = style === 'minimal' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(74, 222, 128, 0.12)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(padX, centerY);
     ctx.lineTo(padX + drawWidth, centerY);
     ctx.stroke();
 
-    // Marcadores de alinhamento nos cantos
+    // Marcadores de canto
     ctx.fillStyle = guideColor;
     const ms = w * 0.008;
     ctx.fillRect(padX - ms, stripTop - ms, ms * 2, ms * 2);
@@ -212,53 +211,32 @@ export class WaveExportComponent implements AfterViewInit {
     ctx.fillRect(padX - ms, stripBottom - ms, ms * 2, ms * 2);
     ctx.fillRect(padX + drawWidth - ms, stripBottom - ms, ms * 2, ms * 2);
 
-    // Glow
+    // Barras verticais — cada barra codifica amplitude na intensidade do canal verde
+    // Encoding: green = round((amplitude + 1) * 0.5 * 215 + 40) → [40..255]
+    const barCount = PREVIEW_SAMPLE_COUNT;
+    const barWidth = drawWidth / barCount;
+    const gap = Math.max(0.3, barWidth * 0.12);
+    const actualBarWidth = Math.max(1, barWidth - gap);
+    const minBarH = Math.max(1.5, w * 0.002);
+
     if (style !== 'minimal') {
       ctx.shadowColor = guideColor;
-      ctx.shadowBlur = 12;
+      ctx.shadowBlur = 6;
     }
 
-    // Preenchimento superior
-    const gradient = ctx.createLinearGradient(padX, stripTop, padX + drawWidth, stripTop);
-    gradient.addColorStop(0, colors[0]);
-    gradient.addColorStop(1, colors[1]);
+    for (let i = 0; i < barCount; i++) {
+      const x = padX + i * barWidth + gap * 0.5;
+      const sample = samples[i];
+      const absAmp = Math.abs(sample);
+      const barH = Math.max(minBarH, absAmp * halfAmplitude);
 
-    ctx.beginPath();
-    ctx.moveTo(padX, centerY);
-    for (let i = 0; i < samples.length; i++) {
-      const x = padX + (i / (samples.length - 1)) * drawWidth;
-      const y = centerY - Math.max(0, samples[i]) * halfAmplitude;
-      ctx.lineTo(x, y);
-    }
-    ctx.lineTo(padX + drawWidth, centerY);
-    ctx.closePath();
-    ctx.fillStyle = style === 'minimal' ? 'rgba(34, 197, 94, 0.12)' : `${colors[0]}1A`;
-    ctx.fill();
+      // Codifica amplitude assinada no canal verde
+      const encoded = Math.round((sample + 1) * 0.5 * 215 + 40);
+      const g = Math.max(40, Math.min(255, encoded));
 
-    // Preenchimento inferior
-    ctx.beginPath();
-    ctx.moveTo(padX, centerY);
-    for (let i = 0; i < samples.length; i++) {
-      const x = padX + (i / (samples.length - 1)) * drawWidth;
-      const y = centerY - Math.min(0, samples[i]) * halfAmplitude;
-      ctx.lineTo(x, y);
+      ctx.fillStyle = `rgb(0, ${g}, 0)`;
+      ctx.fillRect(x, centerY - barH, actualBarWidth, barH * 2);
     }
-    ctx.lineTo(padX + drawWidth, centerY);
-    ctx.closePath();
-    ctx.fillStyle = style === 'minimal' ? 'rgba(34, 197, 94, 0.12)' : `${colors[0]}1A`;
-    ctx.fill();
-
-    // Linha principal da onda
-    ctx.strokeStyle = guideColor;
-    ctx.lineWidth = Math.max(3, w * 0.004);
-    ctx.beginPath();
-    for (let i = 0; i < samples.length; i++) {
-      const x = padX + (i / (samples.length - 1)) * drawWidth;
-      const y = centerY - samples[i] * halfAmplitude;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
 
     ctx.shadowBlur = 0;
     ctx.restore();
