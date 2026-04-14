@@ -8,6 +8,14 @@ import {
   NgZone,
 } from '@angular/core';
 import { RouterLink } from '@angular/router';
+import jsQR from 'jsqr';
+
+import { AudioService } from '../../services/audio';
+import {
+  createOverlayAmplitudes,
+  decodeWavePayload,
+  type WavePayload,
+} from '../../shared/wave-payload';
 
 @Component({
   selector: 'app-camera-visualizer',
@@ -19,26 +27,29 @@ export class CameraVisualizerPage implements OnDestroy {
   @ViewChild('videoElement', { static: true }) videoRef!: ElementRef<HTMLVideoElement>;
   @ViewChild('overlayCanvas', { static: true }) canvasRef!: ElementRef<HTMLCanvasElement>;
 
-  private ngZone = inject(NgZone);
+  private readonly ngZone = inject(NgZone);
+  private readonly audioService = inject(AudioService);
   private mediaStream: MediaStream | null = null;
   private animationId = 0;
   private scanCanvas: HTMLCanvasElement | null = null;
   private scanCtx: CanvasRenderingContext2D | null = null;
+  private qrMissCount = 0;
+  private activeWaveId = '';
+  private usingSessionAudio = false;
 
-  // Dados extraídos da imagem capturada pela câmera
+  // Dados exibidos no overlay a partir do payload lido da imagem
   private waveAmplitudes: number[] = [];
-  private detectedHue = 120; // Matiz dominante (verde por padrão)
 
-  // Síntese de áudio via wavetable
+  // Síntese de fallback via wavetable para quando o áudio original não está carregado
   private audioCtx: AudioContext | null = null;
   private scriptNode: ScriptProcessorNode | null = null;
   private gainNode: GainNode | null = null;
-  private readonly WAVETABLE_SIZE = 2048;
-  private currentWavetable = new Float32Array(2048);
-  private targetWavetable = new Float32Array(2048);
+  private readonly wavetableSize = 2048;
+  private currentWavetable = new Float32Array(this.wavetableSize);
+  private targetWavetable = new Float32Array(this.wavetableSize);
   private playbackPhase = 0;
-  private baseFrequency = 220; // Hz (A3)
-  private fadeGain = 0; // 0 = silêncio, 1 = volume total
+  private baseFrequency = 220;
+  private fadeGain = 0;
 
   readonly isActive = signal(false);
   readonly isDetected = signal(false);
@@ -46,12 +57,12 @@ export class CameraVisualizerPage implements OnDestroy {
   readonly isMuted = signal(false);
   readonly hasError = signal('');
   readonly facingMode = signal<'environment' | 'user'>('environment');
+  readonly playbackMode = signal<'none' | 'session' | 'preview'>('none');
 
   async startCamera(): Promise<void> {
     this.hasError.set('');
 
     try {
-      // Só câmera, sem microfone
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: this.facingMode(),
@@ -69,8 +80,8 @@ export class CameraVisualizerPage implements OnDestroy {
           video.removeEventListener('playing', aoIniciar);
           resolve();
         };
-        video.addEventListener('playing', aoIniciar);
 
+        video.addEventListener('playing', aoIniciar);
         const playPromise = video.play();
         if (playPromise) {
           playPromise.catch(() => {});
@@ -79,45 +90,53 @@ export class CameraVisualizerPage implements OnDestroy {
         setTimeout(() => resolve(), 4000);
       });
 
-      // Canvas auxiliar para ler pixels do vídeo
       this.scanCanvas = document.createElement('canvas');
       this.scanCtx = this.scanCanvas.getContext('2d', { willReadFrequently: true })!;
-
-      // Inicializar contexto de áudio para síntese em tempo real
       await this.initAudio();
 
       this.isActive.set(true);
       this.ngZone.runOutsideAngular(() => this.animate());
     } catch (err) {
-      this.mediaStream?.getTracks().forEach((t) => t.stop());
+      this.mediaStream?.getTracks().forEach((track) => track.stop());
       this.mediaStream = null;
 
       const detalhe = err instanceof Error ? err.message : String(err);
-      const msg =
+      const mensagem =
         err instanceof DOMException && err.name === 'NotAllowedError'
           ? 'Permissão negada. Habilite a câmera nas configurações.'
           : `Erro ao iniciar câmera: ${detalhe}`;
-      this.hasError.set(msg);
+      this.hasError.set(mensagem);
     }
   }
 
   stopCamera(): void {
     cancelAnimationFrame(this.animationId);
-    this.mediaStream?.getTracks().forEach((t) => t.stop());
+    this.mediaStream?.getTracks().forEach((track) => track.stop());
     this.mediaStream = null;
     this.scanCanvas = null;
     this.scanCtx = null;
+    this.clearDetection();
     this.destroyAudio();
+    this.audioService.setMuted(false);
+    this.isMuted.set(false);
     this.isActive.set(false);
-    this.isDetected.set(false);
   }
 
   toggleCamera(): void {
     this.facingMode.set(this.facingMode() === 'environment' ? 'user' : 'environment');
     if (this.isActive()) {
       this.stopCamera();
-      this.startCamera();
+      void this.startCamera();
     }
+  }
+
+  toggleMute(): void {
+    const nextMuted = !this.isMuted();
+    this.isMuted.set(nextMuted);
+    if (this.gainNode) {
+      this.gainNode.gain.value = nextMuted ? 0 : 0.5;
+    }
+    this.audioService.setMuted(nextMuted);
   }
 
   async captureSnapshot(): Promise<void> {
@@ -136,70 +155,77 @@ export class CameraVisualizerPage implements OnDestroy {
       exportCanvas.toBlob(resolve, 'image/png')
     );
 
-    if (blob) {
-      if (navigator.share && /Android|iPhone|iPad/i.test(navigator.userAgent)) {
-        const file = new File([blob], 'wave-scan.png', { type: 'image/png' });
-        await navigator.share({ files: [file], title: 'Wave Scan' });
-      } else {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `wave-scan-${Date.now()}.png`;
-        a.click();
-        URL.revokeObjectURL(url);
-      }
+    if (!blob) {
+      return;
     }
+
+    if (navigator.share && /Android|iPhone|iPad/i.test(navigator.userAgent)) {
+      const file = new File([blob], 'wave-scan.png', { type: 'image/png' });
+      await navigator.share({ files: [file], title: 'Wave Scan' });
+      return;
+    }
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `wave-scan-${Date.now()}.png`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
-  // Inicializar contexto de áudio para síntese via wavetable
+  ngOnDestroy(): void {
+    this.stopCamera();
+  }
+
   private async initAudio(): Promise<void> {
     try {
-      this.audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const AudioCtor =
+        window.AudioContext ||
+        (window as typeof window & { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
+
+      if (!AudioCtor) {
+        return;
+      }
+
+      this.audioCtx = new AudioCtor();
       await this.audioCtx.resume();
 
       this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = 0.5;
+      this.gainNode.gain.value = this.isMuted() ? 0 : 0.5;
       this.gainNode.connect(this.audioCtx.destination);
 
       this.scriptNode = this.audioCtx.createScriptProcessor(2048, 0, 1);
-      this.playbackPhase = 0;
-      this.fadeGain = 0;
       this.currentWavetable.fill(0);
       this.targetWavetable.fill(0);
+      this.playbackPhase = 0;
+      this.fadeGain = 0;
 
       const sampleRate = this.audioCtx.sampleRate;
-
       this.scriptNode.onaudioprocess = (event: AudioProcessingEvent) => {
         const output = event.outputBuffer.getChannelData(0);
-        const wt = this.currentWavetable;
-        const target = this.targetWavetable;
 
-        // Morph suave: wavetable atual → alvo (evita cliques entre frames)
-        for (let s = 0; s < wt.length; s++) {
-          wt[s] += (target[s] - wt[s]) * 0.03;
+        for (let index = 0; index < this.currentWavetable.length; index++) {
+          this.currentWavetable[index] +=
+            (this.targetWavetable[index] - this.currentWavetable[index]) * 0.04;
         }
 
-        // Fade in/out suave (evita cliques ao detectar/perder onda)
-        const targetFade = this.isDetected() ? 1 : 0;
+        const targetFade = this.playbackMode() === 'preview' ? 1 : 0;
+        const phaseIncrement = (this.wavetableSize * this.baseFrequency) / sampleRate;
 
-        // Incremento de fase para frequência desejada
-        const phaseInc = (this.WAVETABLE_SIZE * this.baseFrequency) / sampleRate;
+        for (let index = 0; index < output.length; index++) {
+          this.fadeGain += (targetFade - this.fadeGain) * 0.0012;
 
-        for (let i = 0; i < output.length; i++) {
-          // Fade gradual (~50ms de rampa)
-          this.fadeGain += (targetFade - this.fadeGain) * 0.0008;
+          const position = Math.floor(this.playbackPhase);
+          const fraction = this.playbackPhase - position;
+          const sampleA = this.currentWavetable[position % this.wavetableSize];
+          const sampleB = this.currentWavetable[(position + 1) % this.wavetableSize];
 
-          // Leitura com interpolação linear da wavetable
-          const idx = Math.floor(this.playbackPhase);
-          const frac = this.playbackPhase - idx;
-          const s0 = wt[idx % this.WAVETABLE_SIZE];
-          const s1 = wt[(idx + 1) % this.WAVETABLE_SIZE];
+          output[index] = (sampleA + (sampleB - sampleA) * fraction) * this.fadeGain;
 
-          output[i] = (s0 + (s1 - s0) * frac) * this.fadeGain;
-
-          this.playbackPhase += phaseInc;
-          if (this.playbackPhase >= this.WAVETABLE_SIZE) {
-            this.playbackPhase -= this.WAVETABLE_SIZE;
+          this.playbackPhase += phaseIncrement;
+          if (this.playbackPhase >= this.wavetableSize) {
+            this.playbackPhase -= this.wavetableSize;
           }
         }
       };
@@ -210,31 +236,21 @@ export class CameraVisualizerPage implements OnDestroy {
     }
   }
 
-  // Parar e limpar recursos de áudio
   private destroyAudio(): void {
     this.scriptNode?.disconnect();
     this.scriptNode = null;
     this.gainNode?.disconnect();
     this.gainNode = null;
-    this.audioCtx?.close();
-    this.audioCtx = null;
+
+    if (this.audioCtx) {
+      void this.audioCtx.close();
+      this.audioCtx = null;
+    }
+
     this.currentWavetable.fill(0);
     this.targetWavetable.fill(0);
     this.playbackPhase = 0;
     this.fadeGain = 0;
-    this.isPlayingAudio.set(false);
-  }
-
-  // Alternar mudo/desmudo
-  toggleMute(): void {
-    this.isMuted.set(!this.isMuted());
-    if (this.gainNode) {
-      this.gainNode.gain.value = this.isMuted() ? 0 : 0.5;
-    }
-  }
-
-  ngOnDestroy(): void {
-    this.stopCamera();
   }
 
   private animate(): void {
@@ -244,19 +260,21 @@ export class CameraVisualizerPage implements OnDestroy {
 
     const draw = () => {
       this.animationId = requestAnimationFrame(draw);
-      if (!this.scanCanvas || !this.scanCtx) return;
-
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      if (!vw || !vh) return;
-
-      // Escanear a cada 3 frames (performance)
-      frameCount++;
-      if (frameCount % 3 === 0) {
-        this.scanFrame(video, vw, vh);
+      if (!this.scanCanvas || !this.scanCtx) {
+        return;
       }
 
-      // Ajustar canvas de overlay
+      const videoWidth = video.videoWidth;
+      const videoHeight = video.videoHeight;
+      if (!videoWidth || !videoHeight) {
+        return;
+      }
+
+      frameCount += 1;
+      if (frameCount % 4 === 0) {
+        this.scanFrame(video, videoWidth, videoHeight);
+      }
+
       const rect = video.getBoundingClientRect();
       if (canvas.width !== rect.width * 2 || canvas.height !== rect.height * 2) {
         canvas.width = rect.width * 2;
@@ -265,245 +283,176 @@ export class CameraVisualizerPage implements OnDestroy {
 
       const ctx = canvas.getContext('2d')!;
       ctx.setTransform(2, 0, 0, 2, 0, 0);
-      const w = rect.width;
-      const h = rect.height;
-
-      ctx.clearRect(0, 0, w, h);
+      ctx.clearRect(0, 0, rect.width, rect.height);
 
       if (this.waveAmplitudes.length > 0) {
-        this.drawDetectedWave(ctx, w, h);
+        this.drawDetectedWave(ctx, rect.width, rect.height);
       }
     };
 
     draw();
   }
 
-  // Escanear frame do vídeo para detectar onda circular colorida
-  private scanFrame(video: HTMLVideoElement, vw: number, vh: number): void {
-    // Resolução mais alta para melhor precisão
-    const scale = 0.4;
-    const sw = Math.floor(vw * scale);
-    const sh = Math.floor(vh * scale);
+  private scanFrame(video: HTMLVideoElement, videoWidth: number, videoHeight: number): void {
+    const scale = 0.7;
+    const scanWidth = Math.floor(videoWidth * scale);
+    const scanHeight = Math.floor(videoHeight * scale);
 
-    this.scanCanvas!.width = sw;
-    this.scanCanvas!.height = sh;
-    this.scanCtx!.drawImage(video, 0, 0, sw, sh);
+    this.scanCanvas!.width = scanWidth;
+    this.scanCanvas!.height = scanHeight;
+    this.scanCtx!.drawImage(video, 0, 0, scanWidth, scanHeight);
 
-    const imageData = this.scanCtx!.getImageData(0, 0, sw, sh);
-    const pixels = imageData.data;
+    const imageData = this.scanCtx!.getImageData(0, 0, scanWidth, scanHeight);
+    const qrCode = jsQR(imageData.data, scanWidth, scanHeight, {
+      inversionAttempts: 'attemptBoth',
+    });
 
-    // Passo 1: Histograma de matiz para detectar cor dominante da onda
-    const hueBuckets = new Float64Array(12); // 12 faixas de 30° cada
-    const pixelHues: Float32Array = new Float32Array(sw * sh);
-    const pixelIsBright = new Uint8Array(sw * sh);
-
-    for (let y = 0; y < sh; y++) {
-      for (let x = 0; x < sw; x++) {
-        const i = (y * sw + x) * 4;
-        const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
-        const maxC = Math.max(r, g, b);
-        const minC = Math.min(r, g, b);
-
-        // Ignorar pixels escuros ou dessaturados (fundo)
-        if (maxC < 50 || (maxC - minC) < 20) continue;
-
-        const hue = this.rgbToHue(r, g, b);
-        const idx = y * sw + x;
-        pixelHues[idx] = hue;
-        pixelIsBright[idx] = 1;
-
-        const bucket = Math.floor(hue / 30) % 12;
-        hueBuckets[bucket]++;
+    if (qrCode) {
+      const payload = decodeWavePayload(qrCode.data);
+      if (payload) {
+        this.applyPayload(payload);
+        this.qrMissCount = 0;
+        return;
       }
     }
 
-    // Encontrar matiz dominante
-    let maxBucket = 0, maxCount = 0;
-    for (let i = 0; i < 12; i++) {
-      if (hueBuckets[i] > maxCount) {
-        maxCount = hueBuckets[i];
-        maxBucket = i;
-      }
-    }
-
-    if (maxCount < 30) {
-      this.isDetected.set(false);
-      this.waveAmplitudes = [];
-      if (this.isPlayingAudio()) {
-        this.ngZone.run(() => this.isPlayingAudio.set(false));
-      }
-      return;
-    }
-
-    this.detectedHue = maxBucket * 30 + 15;
-
-    // Passo 2: Criar mapa binário de pixels da onda (filtrados por matiz)
-    const waveMap = new Uint8Array(sw * sh);
-    let totalX = 0, totalY = 0, waveCount = 0;
-    const hueCenter = this.detectedHue;
-
-    for (let y = 0; y < sh; y++) {
-      for (let x = 0; x < sw; x++) {
-        const idx = y * sw + x;
-        if (!pixelIsBright[idx]) continue;
-
-        let hueDiff = Math.abs(pixelHues[idx] - hueCenter);
-        if (hueDiff > 180) hueDiff = 360 - hueDiff;
-
-        if (hueDiff < 50) {
-          waveMap[idx] = 1;
-          totalX += x;
-          totalY += y;
-          waveCount++;
-        }
-      }
-    }
-
-    if (waveCount < 40) {
-      this.isDetected.set(false);
-      this.waveAmplitudes = [];
-      if (this.isPlayingAudio()) {
-        this.ngZone.run(() => this.isPlayingAudio.set(false));
-      }
-      return;
-    }
-
-    this.isDetected.set(true);
-
-    const cx = totalX / waveCount;
-    const cy = totalY / waveCount;
-
-    // Passo 3: Extrair amplitudes radiais com alta resolução
-    const numPoints = 720;
-    const amplitudes: number[] = [];
-    const maxR = Math.min(sw, sh) * 0.45;
-
-    for (let i = 0; i < numPoints; i++) {
-      const angle = (i / numPoints) * Math.PI * 2;
-      let outerDist = 0;
-
-      // Raio com passo de 0.5px para sub-pixel
-      for (let r = 3; r < maxR; r += 0.5) {
-        const px = Math.round(cx + Math.cos(angle) * r);
-        const py = Math.round(cy + Math.sin(angle) * r);
-
-        if (px < 0 || px >= sw || py < 0 || py >= sh) break;
-
-        if (waveMap[py * sw + px]) {
-          outerDist = r;
-        }
-      }
-
-      amplitudes.push(outerDist);
-    }
-
-    // Passo 4: Suavizar com kernel gaussiano
-    const smoothed = this.gaussianSmooth(amplitudes, 9);
-    this.waveAmplitudes = smoothed;
-
-    // Passo 5: Converter para wavetable de áudio
-    this.updateTargetWavetable(smoothed);
-
-    if (!this.isPlayingAudio()) {
-      this.ngZone.run(() => this.isPlayingAudio.set(true));
+    this.qrMissCount += 1;
+    if (this.qrMissCount >= 12) {
+      this.clearDetection();
     }
   }
 
-  // Converter amplitudes detectadas em wavetable normalizada [-1, 1]
-  private updateTargetWavetable(amplitudes: number[]): void {
-    const maxA = Math.max(...amplitudes);
-    const minA = Math.min(...amplitudes);
-    const range = maxA - minA || 1;
-    const mid = (maxA + minA) / 2;
+  private applyPayload(payload: WavePayload): void {
+    const isNewWave = this.activeWaveId !== payload.waveId;
+    this.activeWaveId = payload.waveId;
+    this.waveAmplitudes = createOverlayAmplitudes(payload.preview, 180);
 
-    // Resample com interpolação linear para WAVETABLE_SIZE
-    for (let i = 0; i < this.WAVETABLE_SIZE; i++) {
-      const t = (i / this.WAVETABLE_SIZE) * amplitudes.length;
-      const idx = Math.floor(t);
-      const frac = t - idx;
-      const a0 = amplitudes[idx % amplitudes.length];
-      const a1 = amplitudes[(idx + 1) % amplitudes.length];
-      const interpolated = a0 + (a1 - a0) * frac;
-
-      this.targetWavetable[i] = (interpolated - mid) / (range / 2);
+    if (!this.isDetected()) {
+      this.ngZone.run(() => this.isDetected.set(true));
     }
 
-    // Remover offset DC residual
-    let sum = 0;
-    for (let i = 0; i < this.WAVETABLE_SIZE; i++) sum += this.targetWavetable[i];
-    const dc = sum / this.WAVETABLE_SIZE;
-    for (let i = 0; i < this.WAVETABLE_SIZE; i++) this.targetWavetable[i] -= dc;
+    const canPlayOriginal = this.audioService.loadedWaveId() === payload.waveId;
+    if (canPlayOriginal) {
+      this.targetWavetable.fill(0);
+      if (!this.usingSessionAudio || isNewWave || !this.audioService.isPlaying()) {
+        this.audioService.playLoadedByWaveId(payload.waveId);
+      }
 
-    // Normalizar pico a [-1, 1]
+      this.usingSessionAudio = true;
+      if (this.playbackMode() !== 'session') {
+        this.ngZone.run(() => {
+          this.playbackMode.set('session');
+          this.isPlayingAudio.set(true);
+        });
+      }
+      return;
+    }
+
+    if (this.usingSessionAudio) {
+      this.audioService.stop();
+      this.usingSessionAudio = false;
+    }
+
+    this.updateTargetWavetable(payload.preview);
+    this.baseFrequency = this.estimateBaseFrequency(payload.preview);
+
+    if (this.playbackMode() !== 'preview' || !this.isPlayingAudio()) {
+      this.ngZone.run(() => {
+        this.playbackMode.set('preview');
+        this.isPlayingAudio.set(true);
+      });
+    }
+  }
+
+  private clearDetection(): void {
+    this.qrMissCount = 0;
+    this.activeWaveId = '';
+    this.waveAmplitudes = [];
+    this.targetWavetable.fill(0);
+
+    if (this.usingSessionAudio) {
+      this.audioService.stop();
+      this.usingSessionAudio = false;
+    }
+
+    if (this.isDetected() || this.isPlayingAudio() || this.playbackMode() !== 'none') {
+      this.ngZone.run(() => {
+        this.isDetected.set(false);
+        this.isPlayingAudio.set(false);
+        this.playbackMode.set('none');
+      });
+    }
+  }
+
+  private updateTargetWavetable(preview: Float32Array): void {
+    if (!preview.length) {
+      this.targetWavetable.fill(0);
+      return;
+    }
+
+    for (let index = 0; index < this.wavetableSize; index++) {
+      const position = (index / this.wavetableSize) * preview.length;
+      const baseIndex = Math.floor(position);
+      const fraction = position - baseIndex;
+      const sampleA = preview[baseIndex % preview.length];
+      const sampleB = preview[(baseIndex + 1) % preview.length];
+      this.targetWavetable[index] = sampleA + (sampleB - sampleA) * fraction;
+    }
+
+    let dcOffset = 0;
+    for (let index = 0; index < this.wavetableSize; index++) {
+      dcOffset += this.targetWavetable[index];
+    }
+    dcOffset /= this.wavetableSize;
+
     let peak = 0;
-    for (let i = 0; i < this.WAVETABLE_SIZE; i++) {
-      peak = Math.max(peak, Math.abs(this.targetWavetable[i]));
+    for (let index = 0; index < this.wavetableSize; index++) {
+      this.targetWavetable[index] -= dcOffset;
+      peak = Math.max(peak, Math.abs(this.targetWavetable[index]));
     }
+
     if (peak > 0) {
-      for (let i = 0; i < this.WAVETABLE_SIZE; i++) {
-        this.targetWavetable[i] /= peak;
+      for (let index = 0; index < this.wavetableSize; index++) {
+        this.targetWavetable[index] /= peak;
       }
     }
   }
 
-  // Suavização gaussiana para dados circulares
-  private gaussianSmooth(data: number[], radius: number): number[] {
-    const result: number[] = [];
-    const sigma = radius / 2;
-    const weights: number[] = [];
-    let weightSum = 0;
-
-    for (let j = -radius; j <= radius; j++) {
-      const w = Math.exp(-(j * j) / (2 * sigma * sigma));
-      weights.push(w);
-      weightSum += w;
+  private estimateBaseFrequency(preview: Float32Array): number {
+    if (preview.length < 8) {
+      return 220;
     }
 
-    for (let i = 0; i < data.length; i++) {
-      let s = 0;
-      for (let j = -radius; j <= radius; j++) {
-        const idx = (i + j + data.length) % data.length;
-        s += data[idx] * weights[j + radius];
+    let zeroCrossings = 0;
+    for (let index = 1; index < preview.length; index++) {
+      const previous = preview[index - 1];
+      const current = preview[index];
+      if ((previous <= 0 && current > 0) || (previous >= 0 && current < 0)) {
+        zeroCrossings += 1;
       }
-      result.push(s / weightSum);
     }
 
-    return result;
+    const normalized = zeroCrossings / preview.length;
+    const estimated = 140 + normalized * 320;
+    return Math.min(440, Math.max(140, estimated));
   }
 
-  // Converter RGB para matiz (0-360°)
-  private rgbToHue(r: number, g: number, b: number): number {
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const d = max - min;
-    if (d === 0) return 0;
+  private drawDetectedWave(ctx: CanvasRenderingContext2D, width: number, height: number): void {
+    const amplitudes = this.waveAmplitudes;
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const maxAmplitude = Math.max(...amplitudes, 1);
+    const displayRadius = Math.min(width, height) * 0.35;
 
-    let h: number;
-    if (max === r) h = ((g - b) / d) % 6;
-    else if (max === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-
-    h *= 60;
-    if (h < 0) h += 360;
-    return h;
-  }
-
-  // Desenhar a onda detectada como overlay
-  private drawDetectedWave(ctx: CanvasRenderingContext2D, w: number, h: number): void {
-    const amps = this.waveAmplitudes;
-    const cx = w / 2;
-    const cy = h / 2;
-
-    // Normalizar amplitudes para escala da tela
-    const maxAmp = Math.max(...amps, 1);
-    const displayRadius = Math.min(w, h) * 0.35;
-
-    // Brilho
     ctx.shadowColor = '#4ade80';
     ctx.shadowBlur = 25;
 
-    // Onda detectada
-    const gradient = ctx.createLinearGradient(cx - displayRadius, cy, cx + displayRadius, cy);
+    const gradient = ctx.createLinearGradient(
+      centerX - displayRadius,
+      centerY,
+      centerX + displayRadius,
+      centerY
+    );
     gradient.addColorStop(0, 'rgba(74, 222, 128, 0.9)');
     gradient.addColorStop(0.5, 'rgba(34, 197, 94, 0.9)');
     gradient.addColorStop(1, 'rgba(74, 222, 128, 0.9)');
@@ -512,36 +461,47 @@ export class CameraVisualizerPage implements OnDestroy {
     ctx.lineWidth = 2.5;
     ctx.beginPath();
 
-    for (let i = 0; i <= amps.length; i++) {
-      const angle = (i / amps.length) * Math.PI * 2 - Math.PI / 2;
-      const normalizedAmp = (amps[i % amps.length] / maxAmp);
-      const r = displayRadius * 0.3 + normalizedAmp * displayRadius * 0.7;
-      const x = cx + Math.cos(angle) * r;
-      const y = cy + Math.sin(angle) * r;
+    for (let index = 0; index <= amplitudes.length; index++) {
+      const angle = (index / amplitudes.length) * Math.PI * 2 - Math.PI / 2;
+      const normalizedAmplitude = amplitudes[index % amplitudes.length] / maxAmplitude;
+      const radius = displayRadius * 0.3 + normalizedAmplitude * displayRadius * 0.7;
+      const x = centerX + Math.cos(angle) * radius;
+      const y = centerY + Math.sin(angle) * radius;
 
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+      if (index === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
     }
+
     ctx.closePath();
     ctx.stroke();
 
-    // Preenchimento sutil
     ctx.fillStyle = 'rgba(34, 197, 94, 0.05)';
     ctx.fill();
 
     ctx.shadowBlur = 0;
-
-    // Indicador de detecção no topo
-    ctx.fillStyle = 'rgba(34, 197, 94, 0.9)';
-    ctx.font = `bold ${w * 0.03}px Inter, sans-serif`;
+    ctx.fillStyle = 'rgba(34, 197, 94, 0.92)';
+    ctx.font = `bold ${width * 0.03}px Inter, sans-serif`;
     ctx.textAlign = 'center';
-    const rotulo = this.isPlayingAudio() ? '♪ REPRODUZINDO...' : 'ONDA DETECTADA';
-    ctx.fillText(rotulo, cx, h * 0.06);
+    ctx.fillText(this.overlayLabel(), centerX, height * 0.06);
 
-    // Ponto central
     ctx.beginPath();
-    ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+    ctx.arc(centerX, centerY, 4, 0, Math.PI * 2);
     ctx.fillStyle = '#4ade80';
     ctx.fill();
+  }
+
+  private overlayLabel(): string {
+    if (this.playbackMode() === 'session') {
+      return '♪ ÁUDIO ORIGINAL';
+    }
+
+    if (this.playbackMode() === 'preview') {
+      return '♪ PRÉVIA EMBUTIDA';
+    }
+
+    return 'QR DETECTADO';
   }
 }

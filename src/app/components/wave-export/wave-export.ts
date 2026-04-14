@@ -7,6 +7,9 @@ import {
   signal,
   effect,
 } from '@angular/core';
+import QRCode from 'qrcode';
+
+import { createWavePayload } from '../../shared/wave-payload';
 
 type WaveStyle = 'neon' | 'gradient' | 'minimal' | 'ocean';
 
@@ -25,23 +28,25 @@ export class WaveExportComponent implements AfterViewInit {
   readonly isExporting = signal(false);
 
   private viewReady = false;
+  private qrPayload = '';
 
   constructor() {
     effect(() => {
       const _style = this.selectedStyle();
-      const _data = this.waveformData();
+      const data = this.waveformData();
+      this.qrPayload = data ? createWavePayload(data) : '';
       if (this.viewReady) {
-        this.renderPreview();
+        void this.renderPreview();
       }
     });
   }
 
   ngAfterViewInit(): void {
     this.viewReady = true;
-    this.renderPreview();
+    void this.renderPreview();
   }
 
-  private renderPreview(): void {
+  private async renderPreview(): Promise<void> {
     const canvas = this.previewCanvasRef?.nativeElement;
     const data = this.waveformData();
     if (!canvas || !data) return;
@@ -51,8 +56,10 @@ export class WaveExportComponent implements AfterViewInit {
     canvas.width = size * 2;
     canvas.height = size * 2;
     const ctx = canvas.getContext('2d')!;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.scale(2, 2);
-    this.renderWaveImage(ctx, size, size, data);
+    await this.renderWaveImage(ctx, size, size, data);
   }
 
   readonly styles: { key: WaveStyle; label: string; colors: string[] }[] = [
@@ -80,7 +87,7 @@ export class WaveExportComponent implements AfterViewInit {
       const ctx = canvas.getContext('2d')!;
       ctx.scale(scale, scale);
 
-      this.renderWaveImage(ctx, 1080, 1080, data);
+      await this.renderWaveImage(ctx, 1080, 1080, data);
 
       const blob = await new Promise<Blob | null>((resolve) =>
         canvas.toBlob(resolve, 'image/png')
@@ -104,12 +111,12 @@ export class WaveExportComponent implements AfterViewInit {
     }
   }
 
-  private renderWaveImage(
+  private async renderWaveImage(
     ctx: CanvasRenderingContext2D,
     w: number,
     h: number,
     data: Float32Array
-  ): void {
+  ): Promise<void> {
     const style = this.selectedStyle();
 
     // Fundo
@@ -134,6 +141,9 @@ export class WaveExportComponent implements AfterViewInit {
     // Onda circular
     this.drawCircularWave(ctx, w, h, data, style);
 
+    // Código legível pela câmera
+    await this.drawReadablePayload(ctx, w, h, style);
+
     // Título
     const name = this.fileName() || 'Audio Wave';
     ctx.textAlign = 'center';
@@ -149,6 +159,67 @@ export class WaveExportComponent implements AfterViewInit {
     ctx.font = `${w * 0.018}px Inter, sans-serif`;
     ctx.fillStyle = style === 'minimal' ? '#94a3b8' : 'rgba(255,255,255,0.3)';
     ctx.fillText('Audio Wave App', w / 2, h * 0.95);
+  }
+
+  private async drawReadablePayload(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    style: WaveStyle
+  ): Promise<void> {
+    if (!this.qrPayload) {
+      return;
+    }
+
+    const qrCanvas = document.createElement('canvas');
+    const qrSize = w * 0.18;
+
+    await QRCode.toCanvas(qrCanvas, this.qrPayload, {
+      errorCorrectionLevel: 'M',
+      margin: 1,
+      width: Math.round(qrSize * 2),
+      color: {
+        dark: style === 'minimal' ? '#0f172a' : '#f8fafc',
+        light: style === 'minimal' ? '#ffffff' : '#020617',
+      },
+    });
+
+    const cardSize = qrSize + w * 0.03;
+    const cardX = w * 0.73;
+    const cardY = h * 0.71;
+
+    ctx.save();
+    ctx.fillStyle = style === 'minimal' ? 'rgba(255, 255, 255, 0.95)' : 'rgba(2, 6, 23, 0.88)';
+    ctx.strokeStyle = style === 'minimal' ? 'rgba(15, 23, 42, 0.12)' : 'rgba(255, 255, 255, 0.14)';
+    ctx.lineWidth = 1;
+    this.roundRect(ctx, cardX, cardY, cardSize, cardSize + h * 0.035, w * 0.02);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.drawImage(qrCanvas, cardX + w * 0.015, cardY + w * 0.015, qrSize, qrSize);
+
+    ctx.fillStyle = style === 'minimal' ? '#334155' : 'rgba(255,255,255,0.82)';
+    ctx.font = `600 ${w * 0.012}px Inter, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText('SCAN', cardX + cardSize / 2, cardY + cardSize + h * 0.02);
+    ctx.restore();
+  }
+
+  private roundRect(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    radius: number
+  ): void {
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.arcTo(x + width, y, x + width, y + height, radius);
+    ctx.arcTo(x + width, y + height, x, y + height, radius);
+    ctx.arcTo(x, y + height, x, y, radius);
+    ctx.arcTo(x, y, x + width, y, radius);
+    ctx.closePath();
   }
 
   private drawCircularWave(

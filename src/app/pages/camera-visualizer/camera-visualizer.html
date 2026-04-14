@@ -26,14 +26,16 @@
       <div class="scan-status" [class.detected]="isDetected()" [class.playing]="isPlayingAudio()">
         @if (isDetected()) {
           <span class="status-dot"></span>
-          @if (isPlayingAudio()) {
-            ♪ Reproduzindo onda...
+          @if (playbackMode() === 'session') {
+            ♪ Reproduzindo áudio original
+          } @else if (playbackMode() === 'preview') {
+            ♪ Reproduzindo prévia embutida
           } @else {
-            Onda detectada
+            QR detectado
           }
         } @else {
           <span class="status-scanning"></span>
-          Aponte para uma imagem de onda...
+          Aponte para o QR da arte exportada...
         }
       </div>
     </div>
@@ -88,7 +90,7 @@
       </div>
       <h3>Escaneie suas ondas sonoras</h3>
       <p class="start-description">
-        Aponte a câmera para a imagem de onda gerada e veja ela sendo lida em tempo real
+        Aponte a câmera para o QR da arte exportada para tocar o áudio original da sessão ou a prévia embutida
       </p>
       <button class="start-btn" (click)="startCamera()">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none">

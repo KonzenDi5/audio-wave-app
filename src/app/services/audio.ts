@@ -1,28 +1,40 @@
 import { Injectable, signal } from '@angular/core';
 
+import { createWaveId } from '../shared/wave-payload';
+
 @Injectable({
   providedIn: 'root'
 })
 export class AudioService {
   private audioContext: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
+  private masterGain: GainNode | null = null;
   private sourceNode: AudioBufferSourceNode | null = null;
   private audioBuffer: AudioBuffer | null = null;
   private dataArray: Uint8Array<ArrayBuffer> | null = null;
   private startTime = 0;
   private pauseOffset = 0;
   private animationId = 0;
+  private muted = false;
 
   readonly isPlaying = signal(false);
   readonly isLoaded = signal(false);
   readonly duration = signal(0);
   readonly currentTime = signal(0);
   readonly fileName = signal('');
+  readonly loadedWaveId = signal('');
 
   private getContext(): AudioContext {
     if (!this.audioContext) {
       this.audioContext = new AudioContext();
     }
+
+    if (!this.masterGain) {
+      this.masterGain = this.audioContext.createGain();
+      this.masterGain.gain.value = this.muted ? 0 : 1;
+      this.masterGain.connect(this.audioContext.destination);
+    }
+
     return this.audioContext;
   }
 
@@ -36,10 +48,20 @@ export class AudioService {
     this.duration.set(this.audioBuffer.duration);
     this.fileName.set(file.name);
     this.isLoaded.set(true);
+    this.loadedWaveId.set(createWaveId(this.audioBuffer.getChannelData(0)));
     this.pauseOffset = 0;
     this.currentTime.set(0);
 
     return this.audioBuffer.getChannelData(0);
+  }
+
+  playLoadedByWaveId(waveId: string): boolean {
+    if (!this.audioBuffer || this.loadedWaveId() !== waveId) {
+      return false;
+    }
+
+    this.play();
+    return true;
   }
 
   play(): void {
@@ -59,7 +81,7 @@ export class AudioService {
     this.sourceNode = ctx.createBufferSource();
     this.sourceNode.buffer = this.audioBuffer;
     this.sourceNode.connect(this.analyser);
-    this.analyser.connect(ctx.destination);
+    this.analyser.connect(this.masterGain!);
 
     this.sourceNode.start(0, this.pauseOffset);
     this.startTime = ctx.currentTime - this.pauseOffset;
@@ -107,6 +129,13 @@ export class AudioService {
     return data;
   }
 
+  setMuted(muted: boolean): void {
+    this.muted = muted;
+    if (this.masterGain) {
+      this.masterGain.gain.value = muted ? 0 : 1;
+    }
+  }
+
   private trackTime(): void {
     const update = () => {
       if (!this.isPlaying()) return;
@@ -123,6 +152,8 @@ export class AudioService {
       this.sourceNode?.stop();
     } catch { /* já estava parado */ }
     this.sourceNode?.disconnect();
+    this.analyser?.disconnect();
+    this.analyser = null;
     this.sourceNode = null;
   }
 
