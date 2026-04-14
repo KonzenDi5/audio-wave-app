@@ -16,8 +16,9 @@ import { RouterLink } from '@angular/router';
   styleUrl: './camera-visualizer.scss',
 })
 export class CameraVisualizerPage implements OnDestroy {
-  @ViewChild('videoElement') videoRef!: ElementRef<HTMLVideoElement>;
-  @ViewChild('overlayCanvas') canvasRef!: ElementRef<HTMLCanvasElement>;
+  // ViewChild estático: o vídeo e o canvas estão sempre no DOM (não dentro de @if)
+  @ViewChild('videoElement', { static: true }) videoRef!: ElementRef<HTMLVideoElement>;
+  @ViewChild('overlayCanvas', { static: true }) canvasRef!: ElementRef<HTMLCanvasElement>;
 
   private ngZone = inject(NgZone);
   private mediaStream: MediaStream | null = null;
@@ -36,7 +37,7 @@ export class CameraVisualizerPage implements OnDestroy {
     this.hasError.set('');
 
     try {
-      // Request camera + microphone
+      // Solicitar câmera e microfone
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: this.facingMode(),
@@ -46,47 +47,59 @@ export class CameraVisualizerPage implements OnDestroy {
         audio: true,
       });
 
-      // Set video source — wait for metadata before playing (required by iOS Safari)
+      // Atribuir stream ao vídeo (o elemento já existe no DOM)
       const video = this.videoRef.nativeElement;
-      video.setAttribute('autoplay', '');
-      video.setAttribute('playsinline', '');
-      video.setAttribute('muted', '');
       video.srcObject = this.mediaStream;
 
-      await new Promise<void>((resolve, reject) => {
-        video.onloadedmetadata = () => resolve();
-        video.onerror = () => reject(video.error);
-        // Safety timeout for edge cases
-        setTimeout(() => resolve(), 3000);
+      // Aguardar o vídeo começar a renderizar
+      await new Promise<void>((resolve) => {
+        const aoIniciar = () => {
+          video.removeEventListener('playing', aoIniciar);
+          resolve();
+        };
+        video.addEventListener('playing', aoIniciar);
+
+        // Tentar dar play programaticamente (fallback para autoplay)
+        const playPromise = video.play();
+        if (playPromise) {
+          playPromise.catch(() => {
+            // play() pode falhar em iOS — autoplay deve funcionar mesmo assim
+          });
+        }
+
+        // Segurança: resolver após 4s caso o evento 'playing' não dispare
+        setTimeout(() => resolve(), 4000);
       });
 
-      await video.play();
-
-      // Setup audio analysis — resume context for iOS Safari
-      this.audioContext = new AudioContext();
-      if (this.audioContext.state === 'suspended') {
-        await this.audioContext.resume();
+      // Configurar análise de áudio separadamente (câmera funciona mesmo sem)
+      try {
+        this.audioContext = new AudioContext();
+        if (this.audioContext.state === 'suspended') {
+          await this.audioContext.resume();
+        }
+        const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+        this.analyser = this.audioContext.createAnalyser();
+        this.analyser.fftSize = 2048;
+        source.connect(this.analyser);
+        this.dataArray = new Uint8Array(this.analyser.frequencyBinCount) as Uint8Array<ArrayBuffer>;
+        this.freqArray = new Uint8Array(this.analyser.frequencyBinCount) as Uint8Array<ArrayBuffer>;
+      } catch {
+        // Análise de áudio falhou — câmera continua, só sem overlay de ondas
+        this.analyser = null;
       }
-
-      const source = this.audioContext.createMediaStreamSource(this.mediaStream);
-      this.analyser = this.audioContext.createAnalyser();
-      this.analyser.fftSize = 2048;
-      source.connect(this.analyser);
-
-      this.dataArray = new Uint8Array(this.analyser.frequencyBinCount) as Uint8Array<ArrayBuffer>;
-      this.freqArray = new Uint8Array(this.analyser.frequencyBinCount) as Uint8Array<ArrayBuffer>;
 
       this.isActive.set(true);
       this.ngZone.runOutsideAngular(() => this.animate());
     } catch (err) {
-      // Stop any tracks that were acquired if setup fails
+      // Parar tracks caso a inicialização falhe
       this.mediaStream?.getTracks().forEach((t) => t.stop());
       this.mediaStream = null;
 
+      const detalhe = err instanceof Error ? err.message : String(err);
       const msg =
         err instanceof DOMException && err.name === 'NotAllowedError'
           ? 'Permissão negada. Habilite câmera e microfone nas configurações.'
-          : 'Não foi possível acessar câmera/microfone. Verifique se o navegador tem permissão.';
+          : `Erro ao iniciar câmera: ${detalhe}`;
       this.hasError.set(msg);
     }
   }
@@ -117,16 +130,16 @@ export class CameraVisualizerPage implements OnDestroy {
     const canvas = this.canvasRef.nativeElement;
     const video = this.videoRef.nativeElement;
 
-    // Create a full composite
+    // Criar canvas composto (vídeo + overlay)
     const exportCanvas = document.createElement('canvas');
     exportCanvas.width = video.videoWidth || 1080;
     exportCanvas.height = video.videoHeight || 1920;
     const ctx = exportCanvas.getContext('2d')!;
 
-    // Draw video frame
+    // Desenhar frame do vídeo
     ctx.drawImage(video, 0, 0, exportCanvas.width, exportCanvas.height);
 
-    // Draw overlay
+    // Desenhar overlay das ondas
     ctx.drawImage(canvas, 0, 0, exportCanvas.width, exportCanvas.height);
 
     const blob = await new Promise<Blob | null>((resolve) =>
@@ -160,7 +173,7 @@ export class CameraVisualizerPage implements OnDestroy {
       this.animationId = requestAnimationFrame(draw);
       if (!this.analyser || !this.dataArray || !this.freqArray) return;
 
-      // Match canvas to video size
+      // Ajustar canvas ao tamanho do vídeo
       const rect = video.getBoundingClientRect();
       if (canvas.width !== rect.width * 2 || canvas.height !== rect.height * 2) {
         canvas.width = rect.width * 2;
@@ -262,7 +275,7 @@ export class CameraVisualizerPage implements OnDestroy {
     const points = 180;
     const step = Math.floor(data.length / points);
 
-    // Outer glow circle
+    // Brilho externo
     ctx.shadowColor = '#22c55e';
     ctx.shadowBlur = 30;
 
@@ -287,13 +300,13 @@ export class CameraVisualizerPage implements OnDestroy {
     ctx.closePath();
     ctx.stroke();
 
-    // Inner fill
+    // Preenchimento interno
     ctx.fillStyle = 'rgba(34, 197, 94, 0.05)';
     ctx.fill();
 
     ctx.shadowBlur = 0;
 
-    // Frequency ring
+    // Anel de frequências
     const freqPoints = 64;
     const freqStep = Math.floor(freq.length / freqPoints);
     for (let i = 0; i < freqPoints; i++) {

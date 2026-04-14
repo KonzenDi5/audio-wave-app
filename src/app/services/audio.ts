@@ -121,7 +121,7 @@ export class AudioService {
   private destroySource(): void {
     try {
       this.sourceNode?.stop();
-    } catch { /* already stopped */ }
+    } catch { /* já estava parado */ }
     this.sourceNode?.disconnect();
     this.sourceNode = null;
   }

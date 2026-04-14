@@ -112,7 +112,7 @@ export class WaveExportComponent implements AfterViewInit {
   ): void {
     const style = this.selectedStyle();
 
-    // Background
+    // Fundo
     if (style === 'minimal') {
       ctx.fillStyle = '#ffffff';
     } else {
@@ -131,10 +131,10 @@ export class WaveExportComponent implements AfterViewInit {
     }
     ctx.fillRect(0, 0, w, h);
 
-    // Circular wave
+    // Onda circular
     this.drawCircularWave(ctx, w, h, data, style);
 
-    // Title
+    // Título
     const name = this.fileName() || 'Audio Wave';
     ctx.textAlign = 'center';
     if (style === 'minimal') {
@@ -145,7 +145,7 @@ export class WaveExportComponent implements AfterViewInit {
     ctx.font = `bold ${w * 0.035}px Inter, sans-serif`;
     ctx.fillText(name, w / 2, h * 0.9);
 
-    // Watermark
+    // Marca d'água
     ctx.font = `${w * 0.018}px Inter, sans-serif`;
     ctx.fillStyle = style === 'minimal' ? '#94a3b8' : 'rgba(255,255,255,0.3)';
     ctx.fillText('Audio Wave App', w / 2, h * 0.95);
@@ -167,18 +167,18 @@ export class WaveExportComponent implements AfterViewInit {
 
     const colors = this.styles.find((s) => s.key === style)!.colors;
 
-    // Glow effect
+    // Efeito de brilho
     if (style !== 'minimal') {
       ctx.shadowColor = colors[0];
       ctx.shadowBlur = 30;
     }
 
-    // Draw filled circular wave
+    // Onda circular preenchida
     const gradient = ctx.createLinearGradient(cx - baseRadius, cy, cx + baseRadius, cy);
     gradient.addColorStop(0, colors[0]);
     gradient.addColorStop(1, colors[1]);
 
-    // Mirror wave (outer)
+    // Onda espelhada (externa)
     for (let pass = 0; pass < 2; pass++) {
       ctx.beginPath();
       for (let i = 0; i <= points; i++) {
@@ -223,7 +223,7 @@ export class WaveExportComponent implements AfterViewInit {
 
     ctx.shadowBlur = 0;
 
-    // Center circle
+    // Círculo central
     ctx.beginPath();
     ctx.arc(cx, cy, baseRadius * 0.3, 0, Math.PI * 2);
     if (style === 'minimal') {
@@ -243,7 +243,7 @@ export class WaveExportComponent implements AfterViewInit {
       ctx.stroke();
     }
 
-    // Wave icon in center
+    // Ícone de onda no centro
     ctx.strokeStyle = style === 'minimal' ? colors[0] : colors[0];
     ctx.lineWidth = 2;
     ctx.lineCap = 'round';

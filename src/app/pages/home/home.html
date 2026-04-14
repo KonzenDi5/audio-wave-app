@@ -10,7 +10,7 @@
     <p class="subtitle">Importe um arquivo de áudio e visualize suas ondas sonoras</p>
   </header>
 
-  <!-- Quick Actions -->
+  <!-- Ações Rápidas -->
   <div class="quick-actions">
     <a class="action-card" routerLink="/camera">
       <div class="action-icon">
@@ -29,7 +29,7 @@
     </a>
   </div>
 
-  <!-- Upload Area -->
+  <!-- Área de Upload -->
   @if (!audioService.isLoaded()) {
     <div
       class="upload-area"
@@ -51,7 +51,7 @@
     </div>
   }
 
-  <!-- Player Section -->
+  <!-- Seção do Player -->
   @if (audioService.isLoaded()) {
     <div class="player-section">
       <div class="file-info">
@@ -69,16 +69,16 @@
         </label>
       </div>
 
-      <!-- Visualizer -->
+      <!-- Visualizador -->
       <app-audio-visualizer [waveformData]="waveformData()" />
 
-      <!-- Time Display -->
+      <!-- Tempo -->
       <div class="time-display">
         <span>{{ audioService.formatTime(audioService.currentTime()) }}</span>
         <span>{{ audioService.formatTime(audioService.duration()) }}</span>
       </div>
 
-      <!-- Controls -->
+      <!-- Controles -->
       <div class="controls">
         <button class="control-btn stop-btn" (click)="stop()" [disabled]="!audioService.isPlaying()">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
@@ -107,7 +107,7 @@
         </button>
       </div>
 
-      <!-- Wave Export -->
+      <!-- Exportar Onda -->
       <app-wave-export [waveformData]="waveformData()" [fileName]="audioService.fileName()" />
     </div>
   }

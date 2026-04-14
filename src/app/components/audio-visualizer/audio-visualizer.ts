@@ -80,7 +80,7 @@ export class AudioVisualizerComponent implements AfterViewInit, OnDestroy {
 
     ctx.clearRect(0, 0, w, h);
 
-    // Draw center line
+    // Linha central
     ctx.strokeStyle = 'rgba(34, 197, 94, 0.15)';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -88,7 +88,7 @@ export class AudioVisualizerComponent implements AfterViewInit, OnDestroy {
     ctx.lineTo(w, h / 2);
     ctx.stroke();
 
-    // Draw waveform
+    // Forma de onda
     ctx.strokeStyle = '#22c55e';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -110,16 +110,16 @@ export class AudioVisualizerComponent implements AfterViewInit, OnDestroy {
     }
     ctx.stroke();
 
-    // Draw playback progress overlay
+    // Overlay de progresso da reprodução
     if (this.audioService.isLoaded() && this.audioService.duration() > 0) {
       const progress = this.audioService.currentTime() / this.audioService.duration();
       const xPos = progress * w;
 
-      // Highlight played portion
+      // Destacar trecho reproduzido
       ctx.fillStyle = 'rgba(34, 197, 94, 0.1)';
       ctx.fillRect(0, 0, xPos, h);
 
-      // Playhead line
+      // Linha do cursor de reprodução
       ctx.strokeStyle = '#4ade80';
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -142,7 +142,7 @@ export class AudioVisualizerComponent implements AfterViewInit, OnDestroy {
 
       ctx.clearRect(0, 0, w, h);
 
-      // Update static waveform playhead
+      // Atualizar cursor na forma de onda estática
       const wfData = this.waveformData();
       if (wfData && this.audioService.isPlaying()) {
         this.drawStaticWaveform(wfData);
@@ -153,7 +153,7 @@ export class AudioVisualizerComponent implements AfterViewInit, OnDestroy {
       const data = this.audioService.getWaveData();
       if (!data) return;
 
-      // Draw real-time waveform
+      // Desenhar forma de onda em tempo real
       ctx.fillStyle = 'rgba(2, 6, 23, 0.3)';
       ctx.fillRect(0, 0, w, h);
 
@@ -182,7 +182,7 @@ export class AudioVisualizerComponent implements AfterViewInit, OnDestroy {
       ctx.stroke();
       ctx.shadowBlur = 0;
 
-      // Draw frequency bars at bottom
+      // Barras de frequência na parte inferior
       const freqData = this.audioService.getFrequencyData();
       if (freqData) {
         const barCount = 64;

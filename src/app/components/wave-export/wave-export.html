@@ -6,7 +6,7 @@
     Exportar Imagem
   </h3>
 
-  <!-- Style Selector -->
+  <!-- Seletor de Estilo -->
   <div class="style-selector">
     @for (style of styles; track style.key) {
       <button
@@ -23,14 +23,14 @@
     }
   </div>
 
-  <!-- Preview -->
+  <!-- Prévia -->
   @if (waveformData()) {
     <div class="preview-card">
       <canvas #previewCanvas class="preview-canvas"></canvas>
     </div>
   }
 
-  <!-- Export Button -->
+  <!-- Botão de Exportar -->
   <button
     class="export-btn"
     [disabled]="!waveformData() || isExporting()"

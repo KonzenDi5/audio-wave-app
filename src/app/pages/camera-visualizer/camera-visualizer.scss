@@ -53,7 +53,7 @@
   }
 }
 
-// Start Screen
+// Tela Inicial
 .start-screen {
   flex: 1;
   display: flex;
@@ -118,11 +118,20 @@
   border-radius: 8px;
 }
 
-// Camera View
+// Visão da Câmera
 .camera-view {
   flex: 1;
   display: flex;
   flex-direction: column;
+
+  &.hidden {
+    position: absolute;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+  }
 }
 
 .video-container {
@@ -148,7 +157,7 @@
   }
 }
 
-// Mode Bar
+// Barra de Modos
 .mode-bar {
   display: flex;
   justify-content: center;
@@ -184,7 +193,7 @@
   }
 }
 
-// Bottom Controls
+// Controles Inferiores
 .bottom-controls {
   display: flex;
   justify-content: center;
