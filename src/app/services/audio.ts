@@ -1,6 +1,6 @@
 import { Injectable, signal } from '@angular/core';
 
-import { createWaveId } from '../shared/wave-payload';
+import { sampleWaveform } from '../shared/wave-payload';
 
 @Injectable({
   providedIn: 'root'
@@ -11,6 +11,7 @@ export class AudioService {
   private masterGain: GainNode | null = null;
   private sourceNode: AudioBufferSourceNode | null = null;
   private audioBuffer: AudioBuffer | null = null;
+  private loadedPreview: Float32Array | null = null;
   private dataArray: Uint8Array<ArrayBuffer> | null = null;
   private startTime = 0;
   private pauseOffset = 0;
@@ -22,7 +23,6 @@ export class AudioService {
   readonly duration = signal(0);
   readonly currentTime = signal(0);
   readonly fileName = signal('');
-  readonly loadedWaveId = signal('');
 
   private getContext(): AudioContext {
     if (!this.audioContext) {
@@ -48,20 +48,15 @@ export class AudioService {
     this.duration.set(this.audioBuffer.duration);
     this.fileName.set(file.name);
     this.isLoaded.set(true);
-    this.loadedWaveId.set(createWaveId(this.audioBuffer.getChannelData(0)));
+    this.loadedPreview = sampleWaveform(this.audioBuffer.getChannelData(0));
     this.pauseOffset = 0;
     this.currentTime.set(0);
 
     return this.audioBuffer.getChannelData(0);
   }
 
-  playLoadedByWaveId(waveId: string): boolean {
-    if (!this.audioBuffer || this.loadedWaveId() !== waveId) {
-      return false;
-    }
-
-    this.play();
-    return true;
+  getLoadedPreview(): Float32Array | null {
+    return this.loadedPreview;
   }
 
   play(): void {

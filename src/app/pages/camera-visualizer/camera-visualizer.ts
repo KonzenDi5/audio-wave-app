@@ -8,13 +8,12 @@ import {
   NgZone,
 } from '@angular/core';
 import { RouterLink } from '@angular/router';
-import jsQR from 'jsqr';
 
 import { AudioService } from '../../services/audio';
 import {
+  PREVIEW_SAMPLE_COUNT,
   createOverlayAmplitudes,
-  decodeWavePayload,
-  type WavePayload,
+  sampleWaveform,
 } from '../../shared/wave-payload';
 
 @Component({
@@ -33,9 +32,8 @@ export class CameraVisualizerPage implements OnDestroy {
   private animationId = 0;
   private scanCanvas: HTMLCanvasElement | null = null;
   private scanCtx: CanvasRenderingContext2D | null = null;
-  private qrMissCount = 0;
-  private activeWaveId = '';
   private usingSessionAudio = false;
+  private lastDetectedPreview: Float32Array<ArrayBufferLike> = new Float32Array(0);
 
   // Dados exibidos no overlay a partir do payload lido da imagem
   private waveAmplitudes: number[] = [];
@@ -294,7 +292,7 @@ export class CameraVisualizerPage implements OnDestroy {
   }
 
   private scanFrame(video: HTMLVideoElement, videoWidth: number, videoHeight: number): void {
-    const scale = 0.7;
+    const scale = 0.5;
     const scanWidth = Math.floor(videoWidth * scale);
     const scanHeight = Math.floor(videoHeight * scale);
 
@@ -303,39 +301,29 @@ export class CameraVisualizerPage implements OnDestroy {
     this.scanCtx!.drawImage(video, 0, 0, scanWidth, scanHeight);
 
     const imageData = this.scanCtx!.getImageData(0, 0, scanWidth, scanHeight);
-    const qrCode = jsQR(imageData.data, scanWidth, scanHeight, {
-      inversionAttempts: 'attemptBoth',
-    });
+    const preview = this.extractPreviewWave(imageData.data, scanWidth, scanHeight);
 
-    if (qrCode) {
-      const payload = decodeWavePayload(qrCode.data);
-      if (payload) {
-        this.applyPayload(payload);
-        this.qrMissCount = 0;
-        return;
-      }
+    if (preview) {
+      this.applyPreview(preview);
+      return;
     }
 
-    this.qrMissCount += 1;
-    if (this.qrMissCount >= 12) {
-      this.clearDetection();
-    }
+    this.clearDetection();
   }
 
-  private applyPayload(payload: WavePayload): void {
-    const isNewWave = this.activeWaveId !== payload.waveId;
-    this.activeWaveId = payload.waveId;
-    this.waveAmplitudes = createOverlayAmplitudes(payload.preview, 180);
+  private applyPreview(preview: Float32Array): void {
+    this.lastDetectedPreview = preview;
+    this.waveAmplitudes = createOverlayAmplitudes(preview, 180);
 
     if (!this.isDetected()) {
       this.ngZone.run(() => this.isDetected.set(true));
     }
 
-    const canPlayOriginal = this.audioService.loadedWaveId() === payload.waveId;
-    if (canPlayOriginal) {
+    const similarity = this.compareWithLoadedPreview(preview);
+    if (similarity >= 0.9) {
       this.targetWavetable.fill(0);
-      if (!this.usingSessionAudio || isNewWave || !this.audioService.isPlaying()) {
-        this.audioService.playLoadedByWaveId(payload.waveId);
+      if (!this.usingSessionAudio || !this.audioService.isPlaying()) {
+        this.audioService.play();
       }
 
       this.usingSessionAudio = true;
@@ -353,8 +341,8 @@ export class CameraVisualizerPage implements OnDestroy {
       this.usingSessionAudio = false;
     }
 
-    this.updateTargetWavetable(payload.preview);
-    this.baseFrequency = this.estimateBaseFrequency(payload.preview);
+    this.updateTargetWavetable(preview);
+    this.baseFrequency = this.estimateBaseFrequency(preview);
 
     if (this.playbackMode() !== 'preview' || !this.isPlayingAudio()) {
       this.ngZone.run(() => {
@@ -365,9 +353,8 @@ export class CameraVisualizerPage implements OnDestroy {
   }
 
   private clearDetection(): void {
-    this.qrMissCount = 0;
-    this.activeWaveId = '';
     this.waveAmplitudes = [];
+    this.lastDetectedPreview = new Float32Array(0);
     this.targetWavetable.fill(0);
 
     if (this.usingSessionAudio) {
@@ -382,6 +369,154 @@ export class CameraVisualizerPage implements OnDestroy {
         this.playbackMode.set('none');
       });
     }
+  }
+
+  private extractPreviewWave(
+    pixels: Uint8ClampedArray,
+    width: number,
+    height: number
+  ): Float32Array | null {
+    let totalX = 0;
+    let totalY = 0;
+    let pixelCount = 0;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const index = (y * width + x) * 4;
+        const r = pixels[index];
+        const g = pixels[index + 1];
+        const b = pixels[index + 2];
+
+        if (!this.isReadableWavePixel(r, g, b)) {
+          continue;
+        }
+
+        totalX += x;
+        totalY += y;
+        pixelCount += 1;
+      }
+    }
+
+    if (pixelCount < 120) {
+      return null;
+    }
+
+    const centerX = totalX / pixelCount;
+    const centerY = totalY / pixelCount;
+    const distances: number[] = [];
+
+    for (let index = 0; index < PREVIEW_SAMPLE_COUNT; index++) {
+      const angle = (index / PREVIEW_SAMPLE_COUNT) * Math.PI * 2 - Math.PI / 2;
+      let farthestDistance = 0;
+
+      for (let radius = 10; radius < Math.min(width, height) * 0.48; radius += 1) {
+        const sampleX = Math.round(centerX + Math.cos(angle) * radius);
+        const sampleY = Math.round(centerY + Math.sin(angle) * radius);
+
+        if (sampleX < 0 || sampleX >= width || sampleY < 0 || sampleY >= height) {
+          break;
+        }
+
+        const pixelIndex = (sampleY * width + sampleX) * 4;
+        if (
+          this.isReadableWavePixel(
+            pixels[pixelIndex],
+            pixels[pixelIndex + 1],
+            pixels[pixelIndex + 2]
+          )
+        ) {
+          farthestDistance = radius;
+        }
+      }
+
+      distances.push(farthestDistance);
+    }
+
+    const validCount = distances.filter((distance) => distance > 0).length;
+    if (validCount < PREVIEW_SAMPLE_COUNT * 0.72) {
+      return null;
+    }
+
+    const smoothedDistances = this.gaussianSmooth(distances, 4);
+    const meanRadius = smoothedDistances.reduce((sum, value) => sum + value, 0) / smoothedDistances.length;
+    let peakDelta = 0;
+
+    for (let index = 0; index < smoothedDistances.length; index++) {
+      peakDelta = Math.max(peakDelta, Math.abs(smoothedDistances[index] - meanRadius));
+    }
+
+    if (peakDelta < 3) {
+      return null;
+    }
+
+    const preview = new Float32Array(PREVIEW_SAMPLE_COUNT);
+    for (let index = 0; index < smoothedDistances.length; index++) {
+      preview[index] = this.clamp((smoothedDistances[index] - meanRadius) / peakDelta, -1, 1);
+    }
+
+    return preview;
+  }
+
+  private compareWithLoadedPreview(preview: Float32Array): number {
+    const loadedPreview = this.audioService.getLoadedPreview();
+    if (!loadedPreview || loadedPreview.length !== preview.length) {
+      return 0;
+    }
+
+    let best = -1;
+    const maxShift = 48;
+
+    for (let shift = -maxShift; shift <= maxShift; shift++) {
+      let dot = 0;
+      let energyA = 0;
+      let energyB = 0;
+
+      for (let index = 0; index < preview.length; index++) {
+        const shiftedIndex = (index + shift + preview.length) % preview.length;
+        const a = preview[index];
+        const b = loadedPreview[shiftedIndex];
+        dot += a * b;
+        energyA += a * a;
+        energyB += b * b;
+      }
+
+      const denom = Math.sqrt(energyA * energyB) || 1;
+      best = Math.max(best, dot / denom);
+    }
+
+    return best;
+  }
+
+  private isReadableWavePixel(r: number, g: number, b: number): boolean {
+    return g > 72 && g > r * 1.18 && g > b * 1.08;
+  }
+
+  private gaussianSmooth(data: number[], radius: number): number[] {
+    const result: number[] = [];
+    const sigma = radius / 2;
+    const weights: number[] = [];
+    let weightSum = 0;
+
+    for (let offset = -radius; offset <= radius; offset++) {
+      const weight = Math.exp(-(offset * offset) / (2 * sigma * sigma));
+      weights.push(weight);
+      weightSum += weight;
+    }
+
+    for (let index = 0; index < data.length; index++) {
+      let sum = 0;
+      for (let offset = -radius; offset <= radius; offset++) {
+        const sampleIndex = (index + offset + data.length) % data.length;
+        sum += data[sampleIndex] * weights[offset + radius];
+      }
+      result.push(sum / weightSum);
+    }
+
+    return result;
+  }
+
+  private clamp(value: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, value));
   }
 
   private updateTargetWavetable(preview: Float32Array): void {
