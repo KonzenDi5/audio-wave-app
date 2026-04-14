@@ -44,6 +44,7 @@ export class CameraVisualizerPage implements OnDestroy {
   private bufferSourceNode: AudioBufferSourceNode | null = null;
   private synthGainNode: GainNode | null = null;
   private lastBufferPreview: Float32Array<ArrayBufferLike> = new Float32Array(0);
+  private lastBufferCreationTime = 0;
 
   readonly isActive = signal(false);
   readonly isDetected = signal(false);
@@ -129,7 +130,7 @@ export class CameraVisualizerPage implements OnDestroy {
     this.isMuted.set(nextMuted);
     if (this.synthGainNode && this.audioCtx) {
       this.synthGainNode.gain.setTargetAtTime(
-        nextMuted ? 0 : 0.4,
+        nextMuted ? 0 : 0.5,
         this.audioCtx.currentTime,
         0.05
       );
@@ -355,12 +356,20 @@ export class CameraVisualizerPage implements OnDestroy {
       return;
     }
 
+    const now = performance.now();
+
     // Skip regeneration if waveform hasn't changed significantly
     if (this.bufferSourceNode && this.lastBufferPreview.length === result.preview.length) {
       const sim = this.cosineSimilarity(this.lastBufferPreview, result.preview);
-      if (sim > 0.92) {
+      if (sim > 0.85) {
+        // Waveform stable — keep playing current buffer
         return;
       }
+    }
+
+    // Minimum 1.5s between buffer recreations to prevent click/pop
+    if (this.bufferSourceNode && now - this.lastBufferCreationTime < 1500) {
+      return;
     }
 
     // Stop current playback cleanly
@@ -386,6 +395,7 @@ export class CameraVisualizerPage implements OnDestroy {
     this.bufferSourceNode.start();
 
     this.lastBufferPreview = new Float32Array(result.preview);
+    this.lastBufferCreationTime = now;
 
     const targetGain = this.isMuted() ? 0 : 0.5;
     this.synthGainNode.gain.setTargetAtTime(

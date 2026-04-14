@@ -2,11 +2,17 @@
 wave_decoder.py — Python decoder for horizontal waveform strips.
 
 Reads a camera frame, detects the green-bordered horizontal waveform strip,
-extracts amplitude per bar, then generates a REAL audio PCM buffer via
-additive synthesis with numpy.
+extracts amplitude per bar via multi-column averaging, then generates a clean
+PCM audio buffer via wavetable synthesis with numpy.
 
-The PCM buffer is returned as base64-encoded int16 audio at 22050 Hz (1 second).
-This is played directly as an AudioBuffer in the browser — no oscillator needed.
+Pipeline:
+  1. Detect green guide lines → find strip bounds
+  2. Extract amplitude per bar (average ±3 pixel columns for noise reduction)
+  3. Double-pass smoothing → normalize
+  4. Resample to one waveform period at 220 Hz
+  5. Low-pass via FFT (keep 12 harmonics) for clean tone
+  6. Tile exact number of periods → perfectly seamless loop
+  7. Return as base64-encoded int16 PCM at 22050 Hz
 """
 
 import numpy as np
@@ -17,9 +23,9 @@ SAMPLE_COUNT = 384
 GREEN_MIN = 40
 GREEN_RANGE = 215
 OUTPUT_RATE = 22050
-OUTPUT_DURATION = 1.0
-MAX_HARMONICS = 16
 BASE_FREQUENCY = 220.0
+MAX_HARMONICS = 12
+COL_AVG_RADIUS = 3
 
 
 def _find_strip_bounds(px, w, h):
@@ -60,26 +66,26 @@ def _find_strip_bounds(px, w, h):
 
 
 def _extract_amplitudes(px, top, bot, left, right):
-    """Extract amplitude per bar using bar height position + green intensity."""
+    """Extract amplitude per bar using multi-column averaging + Y position."""
     dw = right - left
     half_strip = (bot - top) / 2.0
-    center_row = (top + bot) / 2.0
     inner_top = top + 3
     inner_bot = bot - 3
+    strip_center_local = (inner_bot - inner_top) / 2.0
 
     amplitudes = np.zeros(SAMPLE_COUNT, dtype=np.float64)
     valid_count = 0
 
     for i in range(SAMPLE_COUNT):
         col_x = left + int(round(i / (SAMPLE_COUNT - 1) * dw))
-        col_x = max(0, min(col_x, px.shape[1] - 1))
 
-        col_slice = px[inner_top:inner_bot, col_x, :]
-        brightness = (
-            col_slice[:, 0].astype(np.float64) +
-            col_slice[:, 1].astype(np.float64) +
-            col_slice[:, 2].astype(np.float64)
-        )
+        # Average ±COL_AVG_RADIUS adjacent columns to reduce camera noise
+        x_lo = max(0, col_x - COL_AVG_RADIUS)
+        x_hi = min(px.shape[1], col_x + COL_AVG_RADIUS + 1)
+        region = px[inner_top:inner_bot, x_lo:x_hi, :].astype(np.float64)
+        col_avg = np.mean(region, axis=1)  # shape: (strip_height, 4)
+
+        brightness = col_avg[:, 0] + col_avg[:, 1] + col_avg[:, 2]
         bar_mask = brightness > 60
         positions = np.where(bar_mask)[0]
 
@@ -90,17 +96,19 @@ def _extract_amplitudes(px, top, bot, left, right):
         bar_bot_pos = float(positions[-1])
         bar_center = (bar_top_pos + bar_bot_pos) / 2.0
 
-        strip_center_local = (inner_bot - inner_top) / 2.0
+        # Y-position amplitude (geometric — survives camera well)
         y_amp = (strip_center_local - bar_center) / (half_strip * 0.45)
         y_amp = max(-1.0, min(1.0, y_amp))
 
-        col_green = col_slice[positions, 1].astype(np.float64)
+        # Green channel decoding (color-based — less reliable through camera)
+        col_green = col_avg[positions, 1]
         max_green = float(np.max(col_green))
 
         if max_green > 35:
             decoded = (max_green - GREEN_MIN) / GREEN_RANGE * 2.0 - 1.0
             decoded = max(-1.0, min(1.0, decoded))
-            amp = decoded * 0.6 + y_amp * 0.4
+            # Favor Y-position (70%) over green (30%) for camera robustness
+            amp = decoded * 0.3 + y_amp * 0.7
         else:
             amp = y_amp
 
@@ -112,46 +120,42 @@ def _extract_amplitudes(px, top, bot, left, right):
 
 def _generate_audio_buffer(amplitudes):
     """
-    Generate clean audio PCM from the 384 amplitude values.
+    Wavetable synthesis: clean periodic audio from extracted amplitudes.
 
-    Strategy: treat the 384 samples as one waveform period, decompose
-    into harmonics via FFT, keep only the first 16, and synthesize
-    1 second of audio via additive synthesis at exact integer-ratio
-    frequencies. This produces a clean, musical tone.
+    1. Resample 384 amplitudes to one exact period at BASE_FREQUENCY
+    2. Low-pass filter via FFT (keep MAX_HARMONICS harmonics)
+    3. Tile exact number of periods → perfectly seamless loop
+    4. No crossfade needed — period boundaries align perfectly
     """
-    n_out = int(OUTPUT_RATE * OUTPUT_DURATION)
+    # One period length in samples
+    period_len = int(round(OUTPUT_RATE / BASE_FREQUENCY))
 
-    # FFT decomposition of the 384-sample waveform
-    fft = np.fft.rfft(amplitudes)
+    # Resample 384 → period_len via linear interpolation
+    x_orig = np.linspace(0, 1, len(amplitudes), endpoint=False)
+    x_new = np.linspace(0, 1, period_len, endpoint=False)
+    one_period = np.interp(x_new, x_orig, amplitudes)
 
-    # Time array for output
-    t = np.arange(n_out, dtype=np.float64) / OUTPUT_RATE
+    # Low-pass: keep only first MAX_HARMONICS harmonics via FFT
+    fft = np.fft.rfft(one_period)
+    n_keep = min(MAX_HARMONICS + 1, len(fft))  # +1 because bin 0 is DC
+    fft[n_keep:] = 0
+    fft[0] = 0  # remove DC offset
+    one_period = np.fft.irfft(fft, n=period_len)
 
-    # Additive synthesis: sum harmonics with correct amplitudes and phases
-    audio = np.zeros(n_out, dtype=np.float64)
-    n_harmonics = min(MAX_HARMONICS, len(fft) - 1)
+    # Exact number of full periods to fill ~1 second
+    n_periods = max(1, int(round(OUTPUT_RATE / period_len)))
+    n_out = n_periods * period_len
 
-    for k in range(1, n_harmonics + 1):
-        mag = np.abs(fft[k])
-        phase = np.angle(fft[k])
-        freq = BASE_FREQUENCY * k
-        if freq > OUTPUT_RATE / 2:
-            break
-        audio += mag * np.cos(2.0 * np.pi * freq * t + phase)
+    # Tile
+    audio = np.tile(one_period, n_periods)
 
     # Normalize
     peak = np.max(np.abs(audio))
     if peak < 0.001:
-        # Fallback: generate a simple sine if waveform had no content
+        t = np.arange(n_out, dtype=np.float64) / OUTPUT_RATE
         audio = 0.7 * np.sin(2.0 * np.pi * BASE_FREQUENCY * t)
     else:
-        audio = audio / peak * 0.85
-
-    # Smooth loop: crossfade first/last 500 samples
-    fade_len = min(500, n_out // 4)
-    fade = np.linspace(0, 1, fade_len)
-    audio[:fade_len] *= fade
-    audio[-fade_len:] *= fade[::-1]
+        audio = audio / peak * 0.8
 
     # Convert to int16
     pcm = (audio * 32767).astype(np.int16)
@@ -184,10 +188,11 @@ def decode_wave_frame(pixels_js, w, h):
     if valid_count < SAMPLE_COUNT * 0.20:
         return empty
 
-    # Smooth extracted amplitudes
-    kernel = np.array([0.04, 0.12, 0.20, 0.28, 0.20, 0.12, 0.04])
+    # Heavy smoothing: apply kernel twice to suppress camera noise
+    kernel = np.array([0.06, 0.1, 0.15, 0.19, 0.15, 0.1, 0.06])
     kernel = kernel / kernel.sum()
     smoothed = np.convolve(amplitudes, kernel, mode='same')
+    smoothed = np.convolve(smoothed, kernel, mode='same')  # second pass
 
     # Remove DC and normalize
     smoothed -= np.mean(smoothed)
@@ -196,7 +201,7 @@ def decode_wave_frame(pixels_js, w, h):
         return empty
     smoothed = smoothed / peak
 
-    # Generate audio buffer
+    # Generate audio buffer via wavetable synthesis
     pcm_b64 = _generate_audio_buffer(smoothed)
 
     confidence = min(1.0, valid_count / SAMPLE_COUNT)
