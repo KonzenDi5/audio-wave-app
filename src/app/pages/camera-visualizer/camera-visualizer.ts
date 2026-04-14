@@ -27,13 +27,18 @@ export class CameraVisualizerPage implements OnDestroy {
 
   // Dados extraídos da imagem capturada pela câmera
   private waveAmplitudes: number[] = [];
+  private detectedHue = 120; // Matiz dominante (verde por padrão)
 
-  // Síntese de áudio a partir da onda detectada
+  // Síntese de áudio via wavetable
   private audioCtx: AudioContext | null = null;
   private scriptNode: ScriptProcessorNode | null = null;
   private gainNode: GainNode | null = null;
-  private normalizedWave: Float32Array = new Float32Array(0);
+  private readonly WAVETABLE_SIZE = 2048;
+  private currentWavetable = new Float32Array(2048);
+  private targetWavetable = new Float32Array(2048);
   private playbackPhase = 0;
+  private baseFrequency = 220; // Hz (A3)
+  private fadeGain = 0; // 0 = silêncio, 1 = volume total
 
   readonly isActive = signal(false);
   readonly isDetected = signal(false);
@@ -146,41 +151,55 @@ export class CameraVisualizerPage implements OnDestroy {
     }
   }
 
-  // Inicializar contexto de áudio para síntese em tempo real
+  // Inicializar contexto de áudio para síntese via wavetable
   private async initAudio(): Promise<void> {
     try {
       this.audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       await this.audioCtx.resume();
 
       this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = 0.6;
+      this.gainNode.gain.value = 0.5;
       this.gainNode.connect(this.audioCtx.destination);
 
-      // ScriptProcessor gera áudio a partir da onda normalizada
       this.scriptNode = this.audioCtx.createScriptProcessor(2048, 0, 1);
       this.playbackPhase = 0;
+      this.fadeGain = 0;
+      this.currentWavetable.fill(0);
+      this.targetWavetable.fill(0);
+
+      const sampleRate = this.audioCtx.sampleRate;
 
       this.scriptNode.onaudioprocess = (event: AudioProcessingEvent) => {
         const output = event.outputBuffer.getChannelData(0);
-        const wave = this.normalizedWave;
+        const wt = this.currentWavetable;
+        const target = this.targetWavetable;
 
-        if (wave.length === 0) {
-          output.fill(0);
-          return;
+        // Morph suave: wavetable atual → alvo (evita cliques entre frames)
+        for (let s = 0; s < wt.length; s++) {
+          wt[s] += (target[s] - wt[s]) * 0.03;
         }
 
+        // Fade in/out suave (evita cliques ao detectar/perder onda)
+        const targetFade = this.isDetected() ? 1 : 0;
+
+        // Incremento de fase para frequência desejada
+        const phaseInc = (this.WAVETABLE_SIZE * this.baseFrequency) / sampleRate;
+
         for (let i = 0; i < output.length; i++) {
-          const floor = Math.floor(this.playbackPhase);
-          const frac = this.playbackPhase - floor;
-          const idx = floor % wave.length;
-          const nextIdx = (floor + 1) % wave.length;
+          // Fade gradual (~50ms de rampa)
+          this.fadeGain += (targetFade - this.fadeGain) * 0.0008;
 
-          // Interpolação linear entre amostras
-          output[i] = wave[idx] * (1 - frac) + wave[nextIdx] * frac;
+          // Leitura com interpolação linear da wavetable
+          const idx = Math.floor(this.playbackPhase);
+          const frac = this.playbackPhase - idx;
+          const s0 = wt[idx % this.WAVETABLE_SIZE];
+          const s1 = wt[(idx + 1) % this.WAVETABLE_SIZE];
 
-          this.playbackPhase += 1;
-          if (this.playbackPhase >= wave.length) {
-            this.playbackPhase -= wave.length;
+          output[i] = (s0 + (s1 - s0) * frac) * this.fadeGain;
+
+          this.playbackPhase += phaseInc;
+          if (this.playbackPhase >= this.WAVETABLE_SIZE) {
+            this.playbackPhase -= this.WAVETABLE_SIZE;
           }
         }
       };
@@ -199,8 +218,10 @@ export class CameraVisualizerPage implements OnDestroy {
     this.gainNode = null;
     this.audioCtx?.close();
     this.audioCtx = null;
-    this.normalizedWave = new Float32Array(0);
+    this.currentWavetable.fill(0);
+    this.targetWavetable.fill(0);
     this.playbackPhase = 0;
+    this.fadeGain = 0;
     this.isPlayingAudio.set(false);
   }
 
@@ -208,7 +229,7 @@ export class CameraVisualizerPage implements OnDestroy {
   toggleMute(): void {
     this.isMuted.set(!this.isMuted());
     if (this.gainNode) {
-      this.gainNode.gain.value = this.isMuted() ? 0 : 0.6;
+      this.gainNode.gain.value = this.isMuted() ? 0 : 0.5;
     }
   }
 
@@ -257,10 +278,10 @@ export class CameraVisualizerPage implements OnDestroy {
     draw();
   }
 
-  // Escanear frame do vídeo para detectar pixels coloridos (onda)
+  // Escanear frame do vídeo para detectar onda circular colorida
   private scanFrame(video: HTMLVideoElement, vw: number, vh: number): void {
-    // Reduzir resolução para performance
-    const scale = 0.25;
+    // Resolução mais alta para melhor precisão
+    const scale = 0.4;
     const sw = Math.floor(vw * scale);
     const sh = Math.floor(vh * scale);
 
@@ -271,31 +292,76 @@ export class CameraVisualizerPage implements OnDestroy {
     const imageData = this.scanCtx!.getImageData(0, 0, sw, sh);
     const pixels = imageData.data;
 
-    // Detectar o centro da região com mais pixels verdes (a onda circular)
-    let totalGreenX = 0;
-    let totalGreenY = 0;
-    let greenCount = 0;
+    // Passo 1: Histograma de matiz para detectar cor dominante da onda
+    const hueBuckets = new Float64Array(12); // 12 faixas de 30° cada
+    const pixelHues: Float32Array = new Float32Array(sw * sh);
+    const pixelIsBright = new Uint8Array(sw * sh);
 
     for (let y = 0; y < sh; y++) {
       for (let x = 0; x < sw; x++) {
         const i = (y * sw + x) * 4;
-        const r = pixels[i];
-        const g = pixels[i + 1];
-        const b = pixels[i + 2];
+        const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+        const maxC = Math.max(r, g, b);
+        const minC = Math.min(r, g, b);
 
-        // Pixel é "verde neon" se G é dominante
-        if (g > 80 && g > r * 1.5 && g > b * 1.5) {
-          totalGreenX += x;
-          totalGreenY += y;
-          greenCount++;
+        // Ignorar pixels escuros ou dessaturados (fundo)
+        if (maxC < 50 || (maxC - minC) < 20) continue;
+
+        const hue = this.rgbToHue(r, g, b);
+        const idx = y * sw + x;
+        pixelHues[idx] = hue;
+        pixelIsBright[idx] = 1;
+
+        const bucket = Math.floor(hue / 30) % 12;
+        hueBuckets[bucket]++;
+      }
+    }
+
+    // Encontrar matiz dominante
+    let maxBucket = 0, maxCount = 0;
+    for (let i = 0; i < 12; i++) {
+      if (hueBuckets[i] > maxCount) {
+        maxCount = hueBuckets[i];
+        maxBucket = i;
+      }
+    }
+
+    if (maxCount < 30) {
+      this.isDetected.set(false);
+      this.waveAmplitudes = [];
+      if (this.isPlayingAudio()) {
+        this.ngZone.run(() => this.isPlayingAudio.set(false));
+      }
+      return;
+    }
+
+    this.detectedHue = maxBucket * 30 + 15;
+
+    // Passo 2: Criar mapa binário de pixels da onda (filtrados por matiz)
+    const waveMap = new Uint8Array(sw * sh);
+    let totalX = 0, totalY = 0, waveCount = 0;
+    const hueCenter = this.detectedHue;
+
+    for (let y = 0; y < sh; y++) {
+      for (let x = 0; x < sw; x++) {
+        const idx = y * sw + x;
+        if (!pixelIsBright[idx]) continue;
+
+        let hueDiff = Math.abs(pixelHues[idx] - hueCenter);
+        if (hueDiff > 180) hueDiff = 360 - hueDiff;
+
+        if (hueDiff < 50) {
+          waveMap[idx] = 1;
+          totalX += x;
+          totalY += y;
+          waveCount++;
         }
       }
     }
 
-    if (greenCount < 50) {
+    if (waveCount < 40) {
       this.isDetected.set(false);
       this.waveAmplitudes = [];
-      this.normalizedWave = new Float32Array(0);
       if (this.isPlayingAudio()) {
         this.ngZone.run(() => this.isPlayingAudio.set(false));
       }
@@ -304,67 +370,122 @@ export class CameraVisualizerPage implements OnDestroy {
 
     this.isDetected.set(true);
 
-    const cx = totalGreenX / greenCount;
-    const cy = totalGreenY / greenCount;
+    const cx = totalX / waveCount;
+    const cy = totalY / waveCount;
 
-    // Extrair amplitudes radiais ao redor do centro detectado
-    const numPoints = 360;
+    // Passo 3: Extrair amplitudes radiais com alta resolução
+    const numPoints = 720;
     const amplitudes: number[] = [];
+    const maxR = Math.min(sw, sh) * 0.45;
 
     for (let i = 0; i < numPoints; i++) {
       const angle = (i / numPoints) * Math.PI * 2;
-      let maxDist = 0;
+      let outerDist = 0;
 
-      // Percorrer raio nesta direção
-      for (let r = 5; r < Math.min(sw, sh) * 0.45; r += 1) {
+      // Raio com passo de 0.5px para sub-pixel
+      for (let r = 3; r < maxR; r += 0.5) {
         const px = Math.round(cx + Math.cos(angle) * r);
         const py = Math.round(cy + Math.sin(angle) * r);
 
         if (px < 0 || px >= sw || py < 0 || py >= sh) break;
 
-        const idx = (py * sw + px) * 4;
-        const rr = pixels[idx];
-        const gg = pixels[idx + 1];
-        const bb = pixels[idx + 2];
-
-        if (gg > 80 && gg > rr * 1.5 && gg > bb * 1.5) {
-          maxDist = r;
+        if (waveMap[py * sw + px]) {
+          outerDist = r;
         }
       }
 
-      amplitudes.push(maxDist);
+      amplitudes.push(outerDist);
     }
 
-    // Suavizar amplitudes
-    const smoothed: number[] = [];
-    const smoothWindow = 5;
-    for (let i = 0; i < amplitudes.length; i++) {
-      let sum = 0;
-      let count = 0;
-      for (let j = -smoothWindow; j <= smoothWindow; j++) {
-        const idx = (i + j + amplitudes.length) % amplitudes.length;
-        sum += amplitudes[idx];
-        count++;
-      }
-      smoothed.push(sum / count);
-    }
-
+    // Passo 4: Suavizar com kernel gaussiano
+    const smoothed = this.gaussianSmooth(amplitudes, 9);
     this.waveAmplitudes = smoothed;
 
-    // Converter amplitudes para forma de onda normalizada [-1, 1]
-    const maxAmpNorm = Math.max(...smoothed);
-    const minAmpNorm = Math.min(...smoothed);
-    const range = maxAmpNorm - minAmpNorm || 1;
-    const mid = (maxAmpNorm + minAmpNorm) / 2;
-
-    this.normalizedWave = new Float32Array(smoothed.length);
-    for (let i = 0; i < smoothed.length; i++) {
-      this.normalizedWave[i] = (smoothed[i] - mid) / (range / 2);
-    }
+    // Passo 5: Converter para wavetable de áudio
+    this.updateTargetWavetable(smoothed);
 
     if (!this.isPlayingAudio()) {
       this.ngZone.run(() => this.isPlayingAudio.set(true));
     }
+  }
+
+  // Converter amplitudes detectadas em wavetable normalizada [-1, 1]
+  private updateTargetWavetable(amplitudes: number[]): void {
+    const maxA = Math.max(...amplitudes);
+    const minA = Math.min(...amplitudes);
+    const range = maxA - minA || 1;
+    const mid = (maxA + minA) / 2;
+
+    // Resample com interpolação linear para WAVETABLE_SIZE
+    for (let i = 0; i < this.WAVETABLE_SIZE; i++) {
+      const t = (i / this.WAVETABLE_SIZE) * amplitudes.length;
+      const idx = Math.floor(t);
+      const frac = t - idx;
+      const a0 = amplitudes[idx % amplitudes.length];
+      const a1 = amplitudes[(idx + 1) % amplitudes.length];
+      const interpolated = a0 + (a1 - a0) * frac;
+
+      this.targetWavetable[i] = (interpolated - mid) / (range / 2);
+    }
+
+    // Remover offset DC residual
+    let sum = 0;
+    for (let i = 0; i < this.WAVETABLE_SIZE; i++) sum += this.targetWavetable[i];
+    const dc = sum / this.WAVETABLE_SIZE;
+    for (let i = 0; i < this.WAVETABLE_SIZE; i++) this.targetWavetable[i] -= dc;
+
+    // Normalizar pico a [-1, 1]
+    let peak = 0;
+    for (let i = 0; i < this.WAVETABLE_SIZE; i++) {
+      peak = Math.max(peak, Math.abs(this.targetWavetable[i]));
+    }
+    if (peak > 0) {
+      for (let i = 0; i < this.WAVETABLE_SIZE; i++) {
+        this.targetWavetable[i] /= peak;
+      }
+    }
+  }
+
+  // Suavização gaussiana para dados circulares
+  private gaussianSmooth(data: number[], radius: number): number[] {
+    const result: number[] = [];
+    const sigma = radius / 2;
+    const weights: number[] = [];
+    let weightSum = 0;
+
+    for (let j = -radius; j <= radius; j++) {
+      const w = Math.exp(-(j * j) / (2 * sigma * sigma));
+      weights.push(w);
+      weightSum += w;
+    }
+
+    for (let i = 0; i < data.length; i++) {
+      let s = 0;
+      for (let j = -radius; j <= radius; j++) {
+        const idx = (i + j + data.length) % data.length;
+        s += data[idx] * weights[j + radius];
+      }
+      result.push(s / weightSum);
+    }
+
+    return result;
+  }
+
+  // Converter RGB para matiz (0-360°)
+  private rgbToHue(r: number, g: number, b: number): number {
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const d = max - min;
+    if (d === 0) return 0;
+
+    let h: number;
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+
+    h *= 60;
+    if (h < 0) h += 360;
+    return h;
   }
 
   // Desenhar a onda detectada como overlay
