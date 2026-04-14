@@ -16,42 +16,40 @@ import { RouterLink } from '@angular/router';
   styleUrl: './camera-visualizer.scss',
 })
 export class CameraVisualizerPage implements OnDestroy {
-  // ViewChild estático: o vídeo e o canvas estão sempre no DOM (não dentro de @if)
   @ViewChild('videoElement', { static: true }) videoRef!: ElementRef<HTMLVideoElement>;
   @ViewChild('overlayCanvas', { static: true }) canvasRef!: ElementRef<HTMLCanvasElement>;
 
   private ngZone = inject(NgZone);
   private mediaStream: MediaStream | null = null;
-  private audioContext: AudioContext | null = null;
-  private analyser: AnalyserNode | null = null;
   private animationId = 0;
-  private dataArray: Uint8Array<ArrayBuffer> | null = null;
-  private freqArray: Uint8Array<ArrayBuffer> | null = null;
+  private scanCanvas: HTMLCanvasElement | null = null;
+  private scanCtx: CanvasRenderingContext2D | null = null;
+
+  // Dados extraídos da imagem capturada pela câmera
+  private waveAmplitudes: number[] = [];
 
   readonly isActive = signal(false);
+  readonly isDetected = signal(false);
   readonly hasError = signal('');
   readonly facingMode = signal<'environment' | 'user'>('environment');
-  readonly visualMode = signal<'wave' | 'bars' | 'circle'>('circle');
 
   async startCamera(): Promise<void> {
     this.hasError.set('');
 
     try {
-      // Solicitar câmera e microfone
+      // Só câmera, sem microfone
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: this.facingMode(),
           width: { ideal: 1280 },
           height: { ideal: 720 },
         },
-        audio: true,
+        audio: false,
       });
 
-      // Atribuir stream ao vídeo (o elemento já existe no DOM)
       const video = this.videoRef.nativeElement;
       video.srcObject = this.mediaStream;
 
-      // Aguardar o vídeo começar a renderizar
       await new Promise<void>((resolve) => {
         const aoIniciar = () => {
           video.removeEventListener('playing', aoIniciar);
@@ -59,46 +57,28 @@ export class CameraVisualizerPage implements OnDestroy {
         };
         video.addEventListener('playing', aoIniciar);
 
-        // Tentar dar play programaticamente (fallback para autoplay)
         const playPromise = video.play();
         if (playPromise) {
-          playPromise.catch(() => {
-            // play() pode falhar em iOS — autoplay deve funcionar mesmo assim
-          });
+          playPromise.catch(() => {});
         }
 
-        // Segurança: resolver após 4s caso o evento 'playing' não dispare
         setTimeout(() => resolve(), 4000);
       });
 
-      // Configurar análise de áudio separadamente (câmera funciona mesmo sem)
-      try {
-        this.audioContext = new AudioContext();
-        if (this.audioContext.state === 'suspended') {
-          await this.audioContext.resume();
-        }
-        const source = this.audioContext.createMediaStreamSource(this.mediaStream);
-        this.analyser = this.audioContext.createAnalyser();
-        this.analyser.fftSize = 2048;
-        source.connect(this.analyser);
-        this.dataArray = new Uint8Array(this.analyser.frequencyBinCount) as Uint8Array<ArrayBuffer>;
-        this.freqArray = new Uint8Array(this.analyser.frequencyBinCount) as Uint8Array<ArrayBuffer>;
-      } catch {
-        // Análise de áudio falhou — câmera continua, só sem overlay de ondas
-        this.analyser = null;
-      }
+      // Canvas auxiliar para ler pixels do vídeo
+      this.scanCanvas = document.createElement('canvas');
+      this.scanCtx = this.scanCanvas.getContext('2d', { willReadFrequently: true })!;
 
       this.isActive.set(true);
       this.ngZone.runOutsideAngular(() => this.animate());
     } catch (err) {
-      // Parar tracks caso a inicialização falhe
       this.mediaStream?.getTracks().forEach((t) => t.stop());
       this.mediaStream = null;
 
       const detalhe = err instanceof Error ? err.message : String(err);
       const msg =
         err instanceof DOMException && err.name === 'NotAllowedError'
-          ? 'Permissão negada. Habilite câmera e microfone nas configurações.'
+          ? 'Permissão negada. Habilite a câmera nas configurações.'
           : `Erro ao iniciar câmera: ${detalhe}`;
       this.hasError.set(msg);
     }
@@ -108,10 +88,10 @@ export class CameraVisualizerPage implements OnDestroy {
     cancelAnimationFrame(this.animationId);
     this.mediaStream?.getTracks().forEach((t) => t.stop());
     this.mediaStream = null;
-    this.audioContext?.close();
-    this.audioContext = null;
-    this.analyser = null;
+    this.scanCanvas = null;
+    this.scanCtx = null;
     this.isActive.set(false);
+    this.isDetected.set(false);
   }
 
   toggleCamera(): void {
@@ -122,24 +102,16 @@ export class CameraVisualizerPage implements OnDestroy {
     }
   }
 
-  setVisualMode(mode: 'wave' | 'bars' | 'circle'): void {
-    this.visualMode.set(mode);
-  }
-
   async captureSnapshot(): Promise<void> {
     const canvas = this.canvasRef.nativeElement;
     const video = this.videoRef.nativeElement;
 
-    // Criar canvas composto (vídeo + overlay)
     const exportCanvas = document.createElement('canvas');
     exportCanvas.width = video.videoWidth || 1080;
     exportCanvas.height = video.videoHeight || 1920;
     const ctx = exportCanvas.getContext('2d')!;
 
-    // Desenhar frame do vídeo
     ctx.drawImage(video, 0, 0, exportCanvas.width, exportCanvas.height);
-
-    // Desenhar overlay das ondas
     ctx.drawImage(canvas, 0, 0, exportCanvas.width, exportCanvas.height);
 
     const blob = await new Promise<Blob | null>((resolve) =>
@@ -148,13 +120,13 @@ export class CameraVisualizerPage implements OnDestroy {
 
     if (blob) {
       if (navigator.share && /Android|iPhone|iPad/i.test(navigator.userAgent)) {
-        const file = new File([blob], 'wave-camera.png', { type: 'image/png' });
-        await navigator.share({ files: [file], title: 'Wave Camera' });
+        const file = new File([blob], 'wave-scan.png', { type: 'image/png' });
+        await navigator.share({ files: [file], title: 'Wave Scan' });
       } else {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `wave-camera-${Date.now()}.png`;
+        a.download = `wave-scan-${Date.now()}.png`;
         a.click();
         URL.revokeObjectURL(url);
       }
@@ -168,159 +140,188 @@ export class CameraVisualizerPage implements OnDestroy {
   private animate(): void {
     const canvas = this.canvasRef.nativeElement;
     const video = this.videoRef.nativeElement;
+    let frameCount = 0;
 
     const draw = () => {
       this.animationId = requestAnimationFrame(draw);
-      if (!this.analyser || !this.dataArray || !this.freqArray) return;
+      if (!this.scanCanvas || !this.scanCtx) return;
 
-      // Ajustar canvas ao tamanho do vídeo
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!vw || !vh) return;
+
+      // Escanear a cada 3 frames (performance)
+      frameCount++;
+      if (frameCount % 3 === 0) {
+        this.scanFrame(video, vw, vh);
+      }
+
+      // Ajustar canvas de overlay
       const rect = video.getBoundingClientRect();
       if (canvas.width !== rect.width * 2 || canvas.height !== rect.height * 2) {
         canvas.width = rect.width * 2;
         canvas.height = rect.height * 2;
-        canvas.getContext('2d')!.scale(2, 2);
       }
 
       const ctx = canvas.getContext('2d')!;
+      ctx.setTransform(2, 0, 0, 2, 0, 0);
       const w = rect.width;
       const h = rect.height;
 
       ctx.clearRect(0, 0, w, h);
 
-      this.analyser!.getByteTimeDomainData(this.dataArray!);
-      this.analyser!.getByteFrequencyData(this.freqArray!);
-
-      const mode = this.visualMode();
-      if (mode === 'wave') {
-        this.drawWave(ctx, w, h);
-      } else if (mode === 'bars') {
-        this.drawBars(ctx, w, h);
-      } else {
-        this.drawCircle(ctx, w, h);
+      if (this.waveAmplitudes.length > 0) {
+        this.drawDetectedWave(ctx, w, h);
       }
     };
 
     draw();
   }
 
-  private drawWave(ctx: CanvasRenderingContext2D, w: number, h: number): void {
-    const data = this.dataArray!;
-    const gradient = ctx.createLinearGradient(0, 0, w, 0);
-    gradient.addColorStop(0, 'rgba(34, 197, 94, 0.9)');
-    gradient.addColorStop(0.5, 'rgba(74, 222, 128, 0.9)');
-    gradient.addColorStop(1, 'rgba(34, 197, 94, 0.9)');
+  // Escanear frame do vídeo para detectar pixels coloridos (onda)
+  private scanFrame(video: HTMLVideoElement, vw: number, vh: number): void {
+    // Reduzir resolução para performance
+    const scale = 0.25;
+    const sw = Math.floor(vw * scale);
+    const sh = Math.floor(vh * scale);
 
-    ctx.strokeStyle = gradient;
-    ctx.lineWidth = 3;
-    ctx.shadowColor = '#22c55e';
-    ctx.shadowBlur = 20;
-    ctx.beginPath();
+    this.scanCanvas!.width = sw;
+    this.scanCanvas!.height = sh;
+    this.scanCtx!.drawImage(video, 0, 0, sw, sh);
 
-    const sliceWidth = w / data.length;
-    let x = 0;
-    for (let i = 0; i < data.length; i++) {
-      const v = data[i] / 128.0;
-      const y = (v * h) / 2;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-      x += sliceWidth;
+    const imageData = this.scanCtx!.getImageData(0, 0, sw, sh);
+    const pixels = imageData.data;
+
+    // Detectar o centro da região com mais pixels verdes (a onda circular)
+    let totalGreenX = 0;
+    let totalGreenY = 0;
+    let greenCount = 0;
+
+    for (let y = 0; y < sh; y++) {
+      for (let x = 0; x < sw; x++) {
+        const i = (y * sw + x) * 4;
+        const r = pixels[i];
+        const g = pixels[i + 1];
+        const b = pixels[i + 2];
+
+        // Pixel é "verde neon" se G é dominante
+        if (g > 80 && g > r * 1.5 && g > b * 1.5) {
+          totalGreenX += x;
+          totalGreenY += y;
+          greenCount++;
+        }
+      }
     }
-    ctx.stroke();
-    ctx.shadowBlur = 0;
+
+    if (greenCount < 50) {
+      this.isDetected.set(false);
+      this.waveAmplitudes = [];
+      return;
+    }
+
+    this.isDetected.set(true);
+
+    const cx = totalGreenX / greenCount;
+    const cy = totalGreenY / greenCount;
+
+    // Extrair amplitudes radiais ao redor do centro detectado
+    const numPoints = 360;
+    const amplitudes: number[] = [];
+
+    for (let i = 0; i < numPoints; i++) {
+      const angle = (i / numPoints) * Math.PI * 2;
+      let maxDist = 0;
+
+      // Percorrer raio nesta direção
+      for (let r = 5; r < Math.min(sw, sh) * 0.45; r += 1) {
+        const px = Math.round(cx + Math.cos(angle) * r);
+        const py = Math.round(cy + Math.sin(angle) * r);
+
+        if (px < 0 || px >= sw || py < 0 || py >= sh) break;
+
+        const idx = (py * sw + px) * 4;
+        const rr = pixels[idx];
+        const gg = pixels[idx + 1];
+        const bb = pixels[idx + 2];
+
+        if (gg > 80 && gg > rr * 1.5 && gg > bb * 1.5) {
+          maxDist = r;
+        }
+      }
+
+      amplitudes.push(maxDist);
+    }
+
+    // Suavizar amplitudes
+    const smoothed: number[] = [];
+    const smoothWindow = 5;
+    for (let i = 0; i < amplitudes.length; i++) {
+      let sum = 0;
+      let count = 0;
+      for (let j = -smoothWindow; j <= smoothWindow; j++) {
+        const idx = (i + j + amplitudes.length) % amplitudes.length;
+        sum += amplitudes[idx];
+        count++;
+      }
+      smoothed.push(sum / count);
+    }
+
+    this.waveAmplitudes = smoothed;
   }
 
-  private drawBars(ctx: CanvasRenderingContext2D, w: number, h: number): void {
-    const freq = this.freqArray!;
-    const barCount = 48;
-    const barWidth = w / barCount;
-    const step = Math.floor(freq.length / barCount);
-
-    for (let i = 0; i < barCount; i++) {
-      const value = freq[i * step] / 255;
-      const barHeight = value * h * 0.6;
-
-      const gradient = ctx.createLinearGradient(0, h, 0, h - barHeight);
-      gradient.addColorStop(0, 'rgba(34, 197, 94, 0.8)');
-      gradient.addColorStop(0.5, 'rgba(74, 222, 128, 0.6)');
-      gradient.addColorStop(1, 'rgba(34, 197, 94, 0.1)');
-
-      ctx.fillStyle = gradient;
-      ctx.shadowColor = '#22c55e';
-      ctx.shadowBlur = 6;
-
-      const x = i * barWidth + 2;
-      const bw = barWidth - 4;
-      const radius = 3;
-
-      ctx.beginPath();
-      ctx.moveTo(x + radius, h - barHeight);
-      ctx.lineTo(x + bw - radius, h - barHeight);
-      ctx.quadraticCurveTo(x + bw, h - barHeight, x + bw, h - barHeight + radius);
-      ctx.lineTo(x + bw, h);
-      ctx.lineTo(x, h);
-      ctx.lineTo(x, h - barHeight + radius);
-      ctx.quadraticCurveTo(x, h - barHeight, x + radius, h - barHeight);
-      ctx.fill();
-    }
-    ctx.shadowBlur = 0;
-  }
-
-  private drawCircle(ctx: CanvasRenderingContext2D, w: number, h: number): void {
-    const data = this.dataArray!;
-    const freq = this.freqArray!;
+  // Desenhar a onda detectada como overlay
+  private drawDetectedWave(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+    const amps = this.waveAmplitudes;
     const cx = w / 2;
     const cy = h / 2;
-    const baseRadius = Math.min(w, h) * 0.2;
-    const maxAmp = Math.min(w, h) * 0.15;
-    const points = 180;
-    const step = Math.floor(data.length / points);
 
-    // Brilho externo
-    ctx.shadowColor = '#22c55e';
-    ctx.shadowBlur = 30;
+    // Normalizar amplitudes para escala da tela
+    const maxAmp = Math.max(...amps, 1);
+    const displayRadius = Math.min(w, h) * 0.35;
 
-    const gradient = ctx.createLinearGradient(cx - baseRadius, cy, cx + baseRadius, cy);
-    gradient.addColorStop(0, 'rgba(34, 197, 94, 0.9)');
+    // Brilho
+    ctx.shadowColor = '#4ade80';
+    ctx.shadowBlur = 25;
+
+    // Onda detectada
+    const gradient = ctx.createLinearGradient(cx - displayRadius, cy, cx + displayRadius, cy);
+    gradient.addColorStop(0, 'rgba(74, 222, 128, 0.9)');
+    gradient.addColorStop(0.5, 'rgba(34, 197, 94, 0.9)');
     gradient.addColorStop(1, 'rgba(74, 222, 128, 0.9)');
 
     ctx.strokeStyle = gradient;
     ctx.lineWidth = 2.5;
     ctx.beginPath();
 
-    for (let i = 0; i <= points; i++) {
-      const angle = (i / points) * Math.PI * 2 - Math.PI / 2;
-      const idx = (i * step) % data.length;
-      const v = (data[idx] - 128) / 128;
-      const r = baseRadius + v * maxAmp;
+    for (let i = 0; i <= amps.length; i++) {
+      const angle = (i / amps.length) * Math.PI * 2 - Math.PI / 2;
+      const normalizedAmp = (amps[i % amps.length] / maxAmp);
+      const r = displayRadius * 0.3 + normalizedAmp * displayRadius * 0.7;
       const x = cx + Math.cos(angle) * r;
       const y = cy + Math.sin(angle) * r;
+
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     }
     ctx.closePath();
     ctx.stroke();
 
-    // Preenchimento interno
+    // Preenchimento sutil
     ctx.fillStyle = 'rgba(34, 197, 94, 0.05)';
     ctx.fill();
 
     ctx.shadowBlur = 0;
 
-    // Anel de frequências
-    const freqPoints = 64;
-    const freqStep = Math.floor(freq.length / freqPoints);
-    for (let i = 0; i < freqPoints; i++) {
-      const angle = (i / freqPoints) * Math.PI * 2 - Math.PI / 2;
-      const value = freq[i * freqStep] / 255;
-      const innerR = baseRadius * 1.3;
-      const outerR = innerR + value * maxAmp * 0.8;
+    // Indicador de detecção no topo
+    ctx.fillStyle = 'rgba(34, 197, 94, 0.9)';
+    ctx.font = `bold ${w * 0.03}px Inter, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText('ONDA DETECTADA', cx, h * 0.06);
 
-      ctx.strokeStyle = `rgba(74, 222, 128, ${0.3 + value * 0.5})`;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(cx + Math.cos(angle) * innerR, cy + Math.sin(angle) * innerR);
-      ctx.lineTo(cx + Math.cos(angle) * outerR, cy + Math.sin(angle) * outerR);
-      ctx.stroke();
-    }
+    // Ponto central
+    ctx.beginPath();
+    ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#4ade80';
+    ctx.fill();
   }
 }
