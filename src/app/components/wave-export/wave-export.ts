@@ -115,6 +115,7 @@ export class WaveExportComponent implements AfterViewInit {
     data: Float32Array
   ): void {
     const style = this.selectedStyle();
+    const colors = this.styles.find((s) => s.key === style)!.colors;
 
     // Fundo
     if (style === 'minimal') {
@@ -135,27 +136,46 @@ export class WaveExportComponent implements AfterViewInit {
     }
     ctx.fillRect(0, 0, w, h);
 
-    // Onda circular
-    this.drawCircularWave(ctx, w, h, data, style);
-
-    // Faixa horizontal com a onda legível pela câmera
-    this.drawHorizontalWaveStrip(ctx, w, h, data, style);
+    // Ícone de onda no centro superior
+    const iconY = h * 0.18;
+    ctx.save();
+    if (style !== 'minimal') {
+      ctx.shadowColor = colors[0];
+      ctx.shadowBlur = 40;
+    }
+    ctx.strokeStyle = colors[0];
+    ctx.lineWidth = Math.max(3, w * 0.004);
+    ctx.lineCap = 'round';
+    const iconBars = [0.3, 0.55, 0.8, 1, 0.8, 0.55, 0.3];
+    const iconH = w * 0.06;
+    const iconSpacing = w * 0.022;
+    const iconStartX = w / 2 - (iconBars.length - 1) * iconSpacing * 0.5;
+    iconBars.forEach((ratio, i) => {
+      const bx = iconStartX + i * iconSpacing;
+      const bh = iconH * ratio;
+      ctx.beginPath();
+      ctx.moveTo(bx, iconY - bh);
+      ctx.lineTo(bx, iconY + bh);
+      ctx.stroke();
+    });
+    ctx.shadowBlur = 0;
+    ctx.restore();
 
     // Título
     const name = this.fileName() || 'Audio Wave';
     ctx.textAlign = 'center';
-    if (style === 'minimal') {
-      ctx.fillStyle = '#1e293b';
-    } else {
-      ctx.fillStyle = '#ffffff';
-    }
-    ctx.font = `bold ${w * 0.032}px Inter, sans-serif`;
-    ctx.fillText(name, w / 2, h * 0.935);
+    ctx.fillStyle = style === 'minimal' ? '#1e293b' : '#ffffff';
+    ctx.font = `bold ${w * 0.038}px Inter, sans-serif`;
+    ctx.fillText(name, w / 2, h * 0.30);
+
+    // Faixa horizontal com a onda legível pela câmera
+    this.drawHorizontalWaveStrip(ctx, w, h, data, style);
 
     // Marca d'água
-    ctx.font = `${w * 0.017}px Inter, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.font = `${w * 0.018}px Inter, sans-serif`;
     ctx.fillStyle = style === 'minimal' ? '#94a3b8' : 'rgba(255,255,255,0.3)';
-    ctx.fillText('Audio Wave App', w / 2, h * 0.975);
+    ctx.fillText('Audio Wave App', w / 2, h * 0.96);
   }
 
   private drawHorizontalWaveStrip(
@@ -166,62 +186,63 @@ export class WaveExportComponent implements AfterViewInit {
     style: WaveStyle
   ): void {
     const samples = sampleWaveform(data, PREVIEW_SAMPLE_COUNT);
-    const guideColor = style === 'minimal' ? '#22c55e' : '#4ade80';
+    const colors = this.styles.find((s) => s.key === style)!.colors;
+    const guideColor = '#22c55e';
 
-    const padX = w * 0.06;
-    const stripTop = h * 0.74;
-    const stripHeight = h * 0.15;
+    const padX = w * 0.05;
+    const stripTop = h * 0.38;
+    const stripHeight = h * 0.48;
     const stripBottom = stripTop + stripHeight;
     const centerY = stripTop + stripHeight / 2;
     const drawWidth = w - padX * 2;
-    const halfAmplitude = stripHeight * 0.44;
+    const halfAmplitude = stripHeight * 0.45;
 
     ctx.save();
 
-    // Fundo escuro da faixa
-    ctx.fillStyle = style === 'minimal' ? 'rgba(241, 245, 249, 0.97)' : 'rgba(0, 0, 0, 0.90)';
-    ctx.fillRect(padX - 8, stripTop - 8, drawWidth + 16, stripHeight + 16);
+    // Fundo da faixa
+    ctx.fillStyle = style === 'minimal' ? 'rgba(241, 245, 249, 0.97)' : 'rgba(0, 0, 0, 0.55)';
+    const radius = w * 0.015;
+    this.roundRect(ctx, padX - 10, stripTop - 10, drawWidth + 20, stripHeight + 20, radius);
+    ctx.fill();
 
-    // Linhas-guia horizontais (verde puro para calibração)
+    // Linhas-guia verde para detecção pela câmera
     ctx.strokeStyle = guideColor;
-    ctx.lineWidth = Math.max(3, w * 0.004);
+    ctx.lineWidth = Math.max(3, w * 0.0035);
     ctx.beginPath();
     ctx.moveTo(padX, stripTop);
     ctx.lineTo(padX + drawWidth, stripTop);
     ctx.stroke();
-
     ctx.beginPath();
     ctx.moveTo(padX, stripBottom);
     ctx.lineTo(padX + drawWidth, stripBottom);
     ctx.stroke();
 
+    // Marcadores de canto verdes
+    ctx.fillStyle = guideColor;
+    const ms = w * 0.007;
+    ctx.fillRect(padX - ms, stripTop - ms, ms * 2, ms * 2);
+    ctx.fillRect(padX + drawWidth - ms, stripTop - ms, ms * 2, ms * 2);
+    ctx.fillRect(padX - ms, stripBottom - ms, ms * 2, ms * 2);
+    ctx.fillRect(padX + drawWidth - ms, stripBottom - ms, ms * 2, ms * 2);
+
     // Linha central sutil
-    ctx.strokeStyle = style === 'minimal' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(74, 222, 128, 0.12)';
+    ctx.strokeStyle = style === 'minimal' ? `${colors[0]}22` : `${colors[0]}18`;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(padX, centerY);
     ctx.lineTo(padX + drawWidth, centerY);
     ctx.stroke();
 
-    // Marcadores de canto
-    ctx.fillStyle = guideColor;
-    const ms = w * 0.008;
-    ctx.fillRect(padX - ms, stripTop - ms, ms * 2, ms * 2);
-    ctx.fillRect(padX + drawWidth - ms, stripTop - ms, ms * 2, ms * 2);
-    ctx.fillRect(padX - ms, stripBottom - ms, ms * 2, ms * 2);
-    ctx.fillRect(padX + drawWidth - ms, stripBottom - ms, ms * 2, ms * 2);
-
-    // Barras verticais — cada barra codifica amplitude na intensidade do canal verde
-    // Encoding: green = round((amplitude + 1) * 0.5 * 215 + 40) → [40..255]
+    // Barras com gradiente do tema + codificação verde
     const barCount = PREVIEW_SAMPLE_COUNT;
     const barWidth = drawWidth / barCount;
-    const gap = Math.max(0.3, barWidth * 0.12);
+    const gap = Math.max(0.5, barWidth * 0.15);
     const actualBarWidth = Math.max(1, barWidth - gap);
-    const minBarH = Math.max(1.5, w * 0.002);
+    const minBarH = Math.max(2, w * 0.003);
 
     if (style !== 'minimal') {
-      ctx.shadowColor = guideColor;
-      ctx.shadowBlur = 6;
+      ctx.shadowColor = colors[0];
+      ctx.shadowBlur = 8;
     }
 
     for (let i = 0; i < barCount; i++) {
@@ -230,11 +251,18 @@ export class WaveExportComponent implements AfterViewInit {
       const absAmp = Math.abs(sample);
       const barH = Math.max(minBarH, absAmp * halfAmplitude);
 
-      // Codifica amplitude assinada no canal verde
+      // Gradiente vertical do tema para a barra visível
+      const grad = ctx.createLinearGradient(x, centerY - barH, x, centerY + barH);
+      grad.addColorStop(0, colors[0]);
+      grad.addColorStop(0.5, colors[1]);
+      grad.addColorStop(1, colors[0]);
+      ctx.fillStyle = grad;
+      ctx.fillRect(x, centerY - barH, actualBarWidth, barH * 2);
+
+      // Sobreposição verde codificando amplitude — é o que o Python lê
       const encoded = Math.round((sample + 1) * 0.5 * 215 + 40);
       const g = Math.max(40, Math.min(255, encoded));
-
-      ctx.fillStyle = `rgb(0, ${g}, 0)`;
+      ctx.fillStyle = `rgba(0, ${g}, 0, 0.55)`;
       ctx.fillRect(x, centerY - barH, actualBarWidth, barH * 2);
     }
 
@@ -242,114 +270,25 @@ export class WaveExportComponent implements AfterViewInit {
     ctx.restore();
   }
 
-  private drawCircularWave(
+  private roundRect(
     ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
     w: number,
     h: number,
-    data: Float32Array,
-    style: WaveStyle
+    r: number
   ): void {
-    const cx = w / 2;
-    const cy = h / 2;
-    const baseRadius = w * 0.2;
-    const maxAmplitude = w * 0.145;
-    const points = 360;
-    const step = Math.floor(data.length / points);
-
-    const colors = this.styles.find((s) => s.key === style)!.colors;
-
-    // Efeito de brilho
-    if (style !== 'minimal') {
-      ctx.shadowColor = colors[0];
-      ctx.shadowBlur = 30;
-    }
-
-    // Onda circular preenchida
-    const gradient = ctx.createLinearGradient(cx - baseRadius, cy, cx + baseRadius, cy);
-    gradient.addColorStop(0, colors[0]);
-    gradient.addColorStop(1, colors[1]);
-
-    // Onda espelhada (externa)
-    for (let pass = 0; pass < 2; pass++) {
-      ctx.beginPath();
-      for (let i = 0; i <= points; i++) {
-        const angle = (i / points) * Math.PI * 2 - Math.PI / 2;
-        const idx = (i * step) % data.length;
-
-        let amplitude = 0;
-        for (let j = 0; j < step && idx + j < data.length; j++) {
-          amplitude += Math.abs(data[idx + j]);
-        }
-        amplitude = (amplitude / step) * maxAmplitude;
-
-        const r = pass === 0 ? baseRadius + amplitude : baseRadius - amplitude * 0.5;
-        const x = cx + Math.cos(angle) * r;
-        const y = cy + Math.sin(angle) * r;
-
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-
-      if (pass === 0) {
-        ctx.strokeStyle = gradient;
-        ctx.lineWidth = 2;
-        ctx.stroke();
-
-        if (style !== 'minimal') {
-          ctx.fillStyle =
-            style === 'neon'
-              ? 'rgba(34, 197, 94, 0.05)'
-              : style === 'gradient'
-              ? 'rgba(249, 115, 22, 0.05)'
-              : 'rgba(6, 182, 212, 0.05)';
-          ctx.fill();
-        }
-      } else {
-        ctx.strokeStyle = style === 'minimal' ? colors[1] : `${colors[1]}88`;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      }
-    }
-
-    ctx.shadowBlur = 0;
-
-    // Círculo central
     ctx.beginPath();
-    ctx.arc(cx, cy, baseRadius * 0.3, 0, Math.PI * 2);
-    if (style === 'minimal') {
-      ctx.fillStyle = '#f1f5f9';
-      ctx.strokeStyle = colors[0];
-      ctx.lineWidth = 2;
-      ctx.fill();
-      ctx.stroke();
-    } else {
-      const innerGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, baseRadius * 0.3);
-      innerGrad.addColorStop(0, `${colors[0]}33`);
-      innerGrad.addColorStop(1, `${colors[0]}11`);
-      ctx.fillStyle = innerGrad;
-      ctx.fill();
-      ctx.strokeStyle = `${colors[0]}66`;
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
-
-    // Ícone de onda no centro
-    ctx.strokeStyle = style === 'minimal' ? colors[0] : colors[0];
-    ctx.lineWidth = 2;
-    ctx.lineCap = 'round';
-    const iconSize = baseRadius * 0.15;
-    const bars = [0.5, 0.8, 1, 0.8, 0.5];
-    const barSpacing = iconSize * 0.5;
-    const startX = cx - (bars.length - 1) * barSpacing * 0.5;
-    bars.forEach((h_ratio, i) => {
-      const bx = startX + i * barSpacing;
-      const bh = iconSize * h_ratio;
-      ctx.beginPath();
-      ctx.moveTo(bx, cy - bh);
-      ctx.lineTo(bx, cy + bh);
-      ctx.stroke();
-    });
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
   }
 
   private isMobile(): boolean {
